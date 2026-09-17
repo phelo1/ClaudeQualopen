@@ -9,7 +9,7 @@
                  Requires ``pip install qmag[ibkr]``; paper port 7497/4002.
 ``MT5Broker``    drives a MetaTrader 5 terminal (Windows) through the official
                  ``MetaTrader5`` package; stops live on the position, the
-                 partial target is a pending sell-limit.
+                 partial target is managed by the execution controller.
 
 The trader only needs: account equity, current positions, place / cancel a
 few order types (market, protective stop, buy-stop-limit bracket, OCO
@@ -60,6 +60,9 @@ class Order:
     fill_price: float | None = None
     filled_at: str | None = None
     tag: str = ""
+    filled_qty: int | None = None
+    fees: float | None = None
+    parent_id: str = ""
 
 
 class Broker(Protocol):
@@ -106,6 +109,7 @@ class _Ledger:
     orders: list[dict] = field(default_factory=list)
     fills: list[dict] = field(default_factory=list)
     last_prices: dict[str, float] = field(default_factory=dict)
+    observed_bars: dict[str, dict] = field(default_factory=dict)
 
 
 class PaperBroker:
@@ -119,9 +123,10 @@ class PaperBroker:
 
     name = "paper"
 
-    def __init__(self, state_path: str | Path = "paper_state/ledger.json", starting_cash: float = 100_000.0, slippage_bps: float = 5.0):
+    def __init__(self, state_path: str | Path = "paper_state/ledger.json", starting_cash: float = 100_000.0, slippage_bps: float = 5.0, commission_per_share: float = 0.0):
         self.path = Path(state_path)
         self.slip = slippage_bps / 10_000
+        self.commission_per_share = commission_per_share
         if self.path.exists():
             raw = json.loads(self.path.read_text())
             self.ledger = _Ledger(**raw)
@@ -201,7 +206,11 @@ class PaperBroker:
     # -- simulation ------------------------------------------------------------
     def _fill(self, order: Order, price: float, when: str) -> None:
         rec = next(o for o in self.ledger.orders if o["id"] == order.id)
-        rec.update(status="filled", fill_price=price, filled_at=when)
+        actual = order.qty if order.side == "buy" else min(order.qty, self.ledger.positions.get(order.symbol, {}).get("qty", 0))
+        order.filled_qty = actual
+        order.fees = actual * self.commission_per_share
+        self.ledger.cash -= order.fees
+        rec.update(status="filled", fill_price=price, filled_at=when, filled_qty=actual, fees=order.fees)
         order.status, order.fill_price, order.filled_at = "filled", price, when
         pos = self.ledger.positions.setdefault(order.symbol, {"qty": 0, "avg_price": 0.0})
         if order.side == "buy":
@@ -224,6 +233,22 @@ class PaperBroker:
         automatically as a resting stop-sell order.
         """
         when = when or pd.Timestamp.now("UTC")
+        # Repeated snapshots of a daily candle contain extrema that happened
+        # before the order existed. Only new extrema / the newly observed close
+        # can trigger orders on a subsequent observation of that same candle.
+        fresh = {}
+        for sym, source in bars.items():
+            bar = source.copy()
+            key = str(getattr(source, "name", None) or when.isoformat())
+            prior = self.ledger.observed_bars.get(sym)
+            if prior and prior["key"] == key:
+                close = float(bar["close"])
+                bar["open"] = close
+                bar["high"] = float(bar["high"]) if float(bar["high"]) > prior["high"] else close
+                bar["low"] = float(bar["low"]) if float(bar["low"]) < prior["low"] else close
+            self.ledger.observed_bars[sym] = {"key": key, "high": float(source["high"]), "low": float(source["low"])}
+            fresh[sym] = bar
+        bars = fresh
         filled: list[Order] = []
         for sym, bar in bars.items():
             self.ledger.last_prices[sym] = float(bar["close"])
@@ -240,7 +265,11 @@ class PaperBroker:
                     continue
                 self._fill(order, px * (1 + self.slip), str(when))
                 filled.append(order)
-                self.stop_sell(order.symbol, order.qty, order.stop_loss, tag=f"protective:{order.tag}")
+                child = self.stop_sell(order.symbol, order.qty, order.stop_loss, tag=f"protective:{order.tag}")
+                next(r for r in self.ledger.orders if r["id"] == child.id)["parent_id"] = order.id
+                if bar["low"] <= order.stop_loss:
+                    self._fill(child, min(float(bar["open"]), order.stop_loss) * (1-self.slip), str(when))
+                    filled.append(child)
             elif order.kind == "stop" and bar["low"] <= order.trigger:
                 px = min(float(bar["open"]), order.trigger) * (1 - self.slip)
                 self._fill(order, px, str(when))
@@ -327,7 +356,7 @@ class AlpacaBroker:
             # Bracket orders need a take-profit leg; park it far away, the
             # trader manages the real exit with partials and the MA trail.
             take_profit=TakeProfitRequest(limit_price=round(trigger * 3, 2)),
-            client_order_id=f"{tag}-{uuid.uuid4().hex[:6]}"[:48] if tag else None,
+            client_order_id=tag[:48] if tag else None,
         )
         if limit is not None:
             req = StopLimitOrderRequest(limit_price=round(limit, 2), **common)
@@ -341,7 +370,7 @@ class AlpacaBroker:
         from alpaca.trading.requests import MarketOrderRequest
 
         side = OrderSide.BUY if side_name == "buy" else OrderSide.SELL
-        o = self.client.submit_order(MarketOrderRequest(symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.DAY))
+        o = self.client.submit_order(MarketOrderRequest(symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.DAY, client_order_id=tag[:48] or None))
         return Order(id=str(o.id), symbol=symbol, side=side_name, qty=qty, kind="market", tag=tag)
 
     def market_buy(self, symbol: str, qty: int, tag: str = "") -> Order:
@@ -355,7 +384,7 @@ class AlpacaBroker:
         from alpaca.trading.requests import StopOrderRequest
 
         o = self.client.submit_order(
-            StopOrderRequest(symbol=symbol, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC, stop_price=round(stop_price, 2))
+            StopOrderRequest(symbol=symbol, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC, stop_price=round(stop_price, 2), client_order_id=tag[:48] or None)
         )
         return Order(id=str(o.id), symbol=symbol, side="sell", qty=qty, kind="stop", trigger=stop_price, tag=tag)
 
@@ -370,6 +399,7 @@ class AlpacaBroker:
                 side=OrderSide.SELL,
                 time_in_force=TimeInForce.GTC,
                 limit_price=round(limit_price, 2),
+                client_order_id=tag[:48] or None,
                 order_class=OrderClass.OCO,
                 take_profit=TakeProfitRequest(limit_price=round(limit_price, 2)),
                 stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
@@ -411,8 +441,24 @@ class IBKRBroker:
         self.port = int(port or os.environ.get("IBKR_PORT") or (7497 if paper else 7496))
         self.client_id = int(client_id or os.environ.get("IBKR_CLIENT_ID", "17"))
         self.paper = paper
+        import asyncio
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
         self.ib = IB()
         self.ib.connect(self.host, self.port, clientId=self.client_id, readonly=False, timeout=15)
+        accounts = list(self.ib.managedAccounts())
+        selected = os.environ.get("IBKR_ACCOUNT", "").strip()
+        if not selected and len(accounts) == 1:
+            selected = accounts[0]
+        if not selected or selected not in accounts:
+            self.ib.disconnect()
+            raise RuntimeError("Select one connected account with IBKR_ACCOUNT; account selection is ambiguous or unavailable")
+        self.account_id = selected
+        if paper and not selected.startswith("DU"):
+            self.ib.disconnect()
+            raise RuntimeError("IBKR paper mode requires a paper account (DU prefix); check gateway login")
         self.name = "ibkr-paper" if paper else "ibkr-live"
 
     # ib_async needs its event loop pumped for fills/positions to update.
@@ -437,21 +483,25 @@ class IBKRBroker:
         """
         rows: dict[str, tuple[float, str]] = {}
         for v in self.ib.accountSummary():
+            if getattr(self, "account_id", None) and v.account != self.account_id:
+                continue
             if v.tag in ("NetLiquidation", "TotalCashValue") and v.currency not in ("", "BASE"):
                 rows.setdefault(v.tag, (float(v.value), v.currency))
         equity, currency = rows.get("NetLiquidation", (0.0, "USD"))
         cash = rows.get("TotalCashValue", (0.0, currency))[0]
         if currency != "USD":
-            rate = next((float(v.value) for v in self.ib.accountValues() if v.tag == "ExchangeRate" and v.currency == "USD"), 0.0)
+            rate = next((float(v.value) for v in self.ib.accountValues() if v.tag == "ExchangeRate" and v.currency == "USD" and (not getattr(self, "account_id", None) or v.account == self.account_id)), 0.0)
             if rate > 0:
                 equity, cash, currency = equity / rate, cash / rate, "USD"
             else:
-                log.warning("IBKR account base currency is %s and no USD rate is available yet; sizing uses %s figures as if they were USD", currency, currency)
+                log.warning("IBKR USD conversion unavailable; new USD risk is blocked until the exchange rate is known")
         return Account(equity=equity, cash=cash, currency=currency)
 
     def positions(self) -> dict[str, BrokerPosition]:
         out: dict[str, BrokerPosition] = {}
         for p in self.ib.positions():
+            if getattr(self, "account_id", None) and p.account != self.account_id:
+                continue
             if p.contract.secType == "STK" and p.position > 0:
                 out[p.contract.symbol] = BrokerPosition(p.contract.symbol, int(p.position), float(p.avgCost))
         return out
@@ -460,6 +510,8 @@ class IBKRBroker:
         out: list[Order] = []
         oca: dict[str, list] = {}
         for t in self.ib.openTrades():
+            if t.order.clientId != self.client_id or (getattr(self, "account_id", None) and t.order.account != self.account_id):
+                continue
             o = t.order
             if o.ocaGroup:
                 oca.setdefault(o.ocaGroup, []).append(t)
@@ -491,9 +543,9 @@ class IBKRBroker:
 
         c = self._contract(symbol)
         lmt = round(limit if limit is not None else trigger * 1.05, 2)
-        parent = StopLimitOrder("BUY", qty, lmtPrice=lmt, stopPrice=round(trigger, 2), tif="DAY", transmit=False, orderRef=tag[:60])
+        parent = StopLimitOrder("BUY", qty, lmtPrice=lmt, stopPrice=round(trigger, 2), tif="DAY", transmit=False, account=self.account_id, orderRef=tag[:60])
         parent.orderId = self.ib.client.getReqId()
-        child = StopOrder("SELL", qty, stopPrice=round(stop_loss, 2), tif="GTC", parentId=parent.orderId, transmit=True, orderRef=f"protective:{symbol}")
+        child = StopOrder("SELL", qty, stopPrice=round(stop_loss, 2), tif="GTC", account=self.account_id, parentId=parent.orderId, transmit=True, orderRef=f"protective:{symbol}")
         self.ib.placeOrder(c, parent)
         self.ib.placeOrder(c, child)
         return Order(id=str(parent.orderId), symbol=symbol, side="buy", qty=qty, kind="buy_stop_bracket", trigger=trigger, stop_loss=stop_loss, limit=lmt, tag=tag)
@@ -501,7 +553,7 @@ class IBKRBroker:
     def _market(self, symbol: str, qty: int, action: str, tag: str) -> Order:
         from ib_async import MarketOrder
 
-        trade = self.ib.placeOrder(self._contract(symbol), MarketOrder(action, qty, tif="DAY", orderRef=tag[:60]))
+        trade = self.ib.placeOrder(self._contract(symbol), MarketOrder(action, qty, tif="DAY", account=self.account_id, orderRef=tag[:60]))
         self.ib.sleep(2)
         status = trade.orderStatus.status
         filled = status == "Filled"
@@ -511,8 +563,9 @@ class IBKRBroker:
             side=action.lower(),
             qty=qty,
             kind="market",
-            status="filled" if filled else "open",
-            fill_price=float(trade.orderStatus.avgFillPrice) if filled else None,
+            filled_qty=int(trade.orderStatus.filled or 0),
+            status="filled" if filled else "partial" if trade.orderStatus.filled else "open",
+            fill_price=float(trade.orderStatus.avgFillPrice) if trade.orderStatus.filled else None,
             tag=tag,
         )
 
@@ -525,7 +578,7 @@ class IBKRBroker:
     def stop_sell(self, symbol: str, qty: int, stop_price: float, tag: str = "") -> Order:
         from ib_async import StopOrder
 
-        trade = self.ib.placeOrder(self._contract(symbol), StopOrder("SELL", qty, stopPrice=round(stop_price, 2), tif="GTC", orderRef=tag[:60]))
+        trade = self.ib.placeOrder(self._contract(symbol), StopOrder("SELL", qty, stopPrice=round(stop_price, 2), tif="GTC", account=self.account_id, orderRef=tag[:60]))
         return Order(id=str(trade.order.orderId), symbol=symbol, side="sell", qty=qty, kind="stop", trigger=stop_price, tag=tag)
 
     def oco_sell(self, symbol: str, qty: int, limit_price: float, stop_price: float, tag: str = "") -> Order:
@@ -534,8 +587,8 @@ class IBKRBroker:
         c = self._contract(symbol)
         group = f"qmag-{symbol}-{uuid.uuid4().hex[:6]}"
         # ocaType 1: when one leg fills, cancel the other.
-        lmt = LimitOrder("SELL", qty, lmtPrice=round(limit_price, 2), tif="GTC", ocaGroup=group, ocaType=1, orderRef=tag[:60])
-        stp = StopOrder("SELL", qty, stopPrice=round(stop_price, 2), tif="GTC", ocaGroup=group, ocaType=1, orderRef=tag[:60])
+        lmt = LimitOrder("SELL", qty, lmtPrice=round(limit_price, 2), tif="GTC", account=self.account_id, ocaGroup=group, ocaType=1, orderRef=tag[:60])
+        stp = StopOrder("SELL", qty, stopPrice=round(stop_price, 2), tif="GTC", account=self.account_id, ocaGroup=group, ocaType=1, orderRef=tag[:60])
         t1 = self.ib.placeOrder(c, lmt)
         t2 = self.ib.placeOrder(c, stp)
         return Order(id=f"{t1.order.orderId},{t2.order.orderId}", symbol=symbol, side="sell", qty=qty, kind="oco", trigger=stop_price, limit=limit_price, tag=tag)
@@ -543,6 +596,8 @@ class IBKRBroker:
     def cancel_orders(self, symbol: str | None = None) -> int:
         n = 0
         for t in self.ib.openTrades():
+            if t.order.clientId != self.client_id or (getattr(self, "account_id", None) and t.order.account != self.account_id):
+                continue
             if symbol is None or t.contract.symbol == symbol:
                 self.ib.cancelOrder(t.order)
                 n += 1
@@ -639,10 +694,13 @@ class MT5Broker:
     # -- read side -----------------------------------------------------------
     def account(self) -> Account:
         a = self.mt5.account_info()
-        return Account(equity=float(a.equity), cash=float(a.margin_free))
+        return Account(equity=float(a.equity), cash=float(a.margin_free), currency=str(a.currency))
 
     def _long_positions(self) -> list:
-        return [p for p in (self.mt5.positions_get() or []) if p.type == self.mt5.POSITION_TYPE_BUY and p.magic == self.magic]
+        rows = self.mt5.positions_get()
+        if rows is None:
+            raise RuntimeError(f"MT5 position read failed: {self.mt5.last_error()}")
+        return [p for p in rows if p.type == self.mt5.POSITION_TYPE_BUY and p.magic == self.magic]
 
     def positions(self) -> dict[str, BrokerPosition]:
         out: dict[str, BrokerPosition] = {}
@@ -659,7 +717,10 @@ class MT5Broker:
 
     def open_orders(self) -> list[Order]:
         out: list[Order] = []
-        pending = [o for o in (self.mt5.orders_get() or []) if o.magic == self.magic]
+        rows = self.mt5.orders_get()
+        if rows is None:
+            raise RuntimeError(f"MT5 order read failed: {self.mt5.last_error()}")
+        pending = [o for o in rows if o.magic == self.magic]
         sl_by_symbol: dict[str, float] = {}
         held: dict[str, int] = {}
         for p in self._long_positions():
@@ -725,7 +786,13 @@ class MT5Broker:
             # Netting: reduces the aggregate position. Hedging: close against the largest ticket.
             longs = [p for p in self._long_positions() if self._plain(p.symbol) == symbol]
             if longs and getattr(self.mt5.account_info(), "margin_mode", 0) == getattr(self.mt5, "ACCOUNT_MARGIN_MODE_RETAIL_HEDGING", 2):
-                req["position"] = max(longs, key=lambda p: p.volume).ticket
+                ticket = max(longs, key=lambda p: p.volume)
+                req["position"] = ticket.ticket
+                # Close one ticket at a time; reconciliation schedules the
+                # remaining quantity on the next pass, never opens a short.
+                req["volume"] = min(req["volume"], ticket.volume)
+            if not longs:
+                raise RuntimeError(f"MT5 has no owned long position to close for {symbol}")
         res = self._send(req)
         filled = res.retcode in (self.mt5.TRADE_RETCODE_DONE, self.mt5.TRADE_RETCODE_DONE_PARTIAL) and res.volume > 0
         return Order(
@@ -734,7 +801,8 @@ class MT5Broker:
             side=side,
             qty=qty,
             kind="market",
-            status="filled" if filled else "open",
+            filled_qty=self._shares(info.name, res.volume) if filled else 0,
+            status="filled" if filled and self._shares(info.name, res.volume) >= qty else "partial" if filled else "open",
             fill_price=float(res.price) if filled and res.price else None,
             tag=tag,
         )
@@ -763,22 +831,10 @@ class MT5Broker:
         self._set_position_sl(symbol, stop_price)
         return Order(id=f"sl:{symbol}", symbol=symbol, side="sell", qty=qty, kind="stop", trigger=stop_price, tag=tag)
 
+    native_oco = False
+
     def oco_sell(self, symbol: str, qty: int, limit_price: float, stop_price: float, tag: str = "") -> Order:
-        info = self._info(symbol)
-        self._set_position_sl(symbol, stop_price)
-        res = self._send({
-            "action": self.mt5.TRADE_ACTION_PENDING,
-            "symbol": info.name,
-            "volume": self._lots(symbol, qty),
-            "type": self.mt5.ORDER_TYPE_SELL_LIMIT,
-            "price": round(limit_price, info.digits),
-            "deviation": self.deviation,
-            "magic": self.magic,
-            "comment": tag[:31],
-            "type_time": self.mt5.ORDER_TIME_GTC,
-            "type_filling": self.mt5.ORDER_FILLING_RETURN,
-        })
-        return Order(id=str(res.order), symbol=symbol, side="sell", qty=qty, kind="oco", trigger=stop_price, limit=limit_price, tag=tag)
+        raise RuntimeError("MT5 uses server-side stops and controller-managed partial targets; no synthetic sell-limit OCO")
 
     def cancel_orders(self, symbol: str | None = None) -> int:
         """Cancel pending orders. Position stop-losses are left in place: the

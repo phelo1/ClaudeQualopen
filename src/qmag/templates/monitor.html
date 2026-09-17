@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% set active = 'monitor' %}
+{% block title %}Market monitor · ClaudeQual{% endblock %}
+{% block content %}
+<main class="monitor-page">
+<div class="page-heading"><div><div class="eyebrow">Every idea, in context</div><h1>Market monitor</h1><p class="m">Watch the setup, follow the execution, and see the result.</p></div><a class="button ghost" href="/desk">Trading desk ↗</a></div>
+<div class="monitor-toolbar"><label>Find a symbol <input id="monitor-search" type="search" placeholder="Filter monitored symbols…"></label><label>View <select id="monitor-kind"><option value="all">All monitored stocks</option><option value="position">Open positions</option><option value="pending">Pending orders</option><option value="watching">Watching</option></select></label><label>Chart window <select id="monitor-range"><option value="90">90 sessions</option><option value="30">30 sessions</option><option value="180">180 sessions</option></select></label><span id="monitor-count" class="m"></span></div>
+<div id="monitor-grid" class="monitor-grid"></div>
+<div id="monitor-empty" class="panel empty-state"><h2>No monitored charts yet.</h2><p>Charts appear automatically when a scan arms a setup or an order becomes a position. The monitor uses recorded market prices and execution records.</p><a class="button" href="/operations">Open operations</a></div>
+<p class="m">A potential entry is a plan. Actual entries and fills are labelled separately. P&amp;L uses the latest recorded price; the chart timestamp shows its age. Hover over a candle for prices.</p>
+</main>
+<script src="/static/monitor.js" defer></script>
+{% endblock %}

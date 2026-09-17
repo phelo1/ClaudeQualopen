@@ -1,0 +1,13 @@
+{% extends "base.html" %}{% set active = 'operations' %}
+{% block title %}Operations · ClaudeQual{% endblock %}
+{% block content %}
+<main class="operations-main">
+  <div class="page-heading col-12"><div><div class="eyebrow">AUTONOMOUS WORKSPACE</div><h1>Operations</h1><p class="m">Routine work runs on schedule. Exceptions, evidence and recovery stay visible.</p></div><button id="backup">Back up state</button></div>
+  <section class="col-12"><div class="ops-flow">Discover <span>→</span> Qualify <span>→</span> Size & execute <span>→</span> Reconcile <span>→</span> Learn & validate <span>↻</span></div></section>
+  <section class="col-8"><h2>Attention queue <span class="pill" id="overall">Checking</span></h2><div id="issues"></div></section>
+  <section class="col-4"><h2>Workspace state</h2><dl id="state" class="ops-definition"></dl><p class="m">Stops and targets are managed automatically. Broker uncertainty blocks new risk until reconciliation succeeds.</p></section>
+  <section class="col-8"><h2>Scheduled work</h2><div class="table-wrap"><table><thead><tr><th>Job</th><th>Last run</th><th>Result</th></tr></thead><tbody id="jobs"></tbody></table></div></section>
+  <section class="col-4"><h2>For maintenance agents</h2><p>Use the structured operations endpoint for status, order reconciliation and research progress. Each issue includes a suggested recovery action.</p><p><a href="/api/operations">Operations JSON ↗</a></p><p><a href="/docs">API reference ↗</a></p><p class="m">Backups exclude credentials. Restoring trading state requires reconciliation with the broker before resuming.</p><output id="result" aria-live="polite"></output></section>
+</main>
+{% endblock %}
+{% block scripts %}<script src="/static/operations.js"></script>{% endblock %}

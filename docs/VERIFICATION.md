@@ -1,70 +1,90 @@
-# Rebuild verification and delivery status
+# Verification and delivery status
 
-Verified 16–17 September 2026. Source reviewed: `phelo1/Claude_Qual` at
-`eae50d69c3aeee7d8c376773950eb56267258541`. The original repository was not modified.
+Verified 17 September 2026. Source reviewed: phelo1/Claude_Qual at
+eae50d69c3aeee7d8c376773950eb56267258541. The original repository was not modified.
+This report supersedes the 0.2 verification report for current behavior.
 
 ## Executed checks
 
 | Check | Result | Scope |
 |---|---|---|
-| Original test suite | 247 passed, 8 failed | Windows, Python 3.12.10; five POSIX permission assertions, two POSIX `sleep` assumptions, one date-sensitive CLI expectation |
-| Rebuilt full suite | **273 passed** in 356.73 seconds | All tests, four pytest workers; 18 additional regression cases including parametrization |
-| Focused safety suite | 26 passed | Execution, persistence, learning and interface checks during development |
-| Wheel build | Passed | `hatchling build -t wheel`; static CSS, templates and persistence module confirmed in wheel |
-| Real browser | Passed inspected states | Nine main pages at desktop and mobile widths, dark theme, empty workspace and navigation; overflow corrections checked down to 320 px |
-| CI configuration | Added | GitHub Actions matrix: Ubuntu/Windows, Python 3.11/3.12; remote results are shown in the repository Actions tab |
+| Original source suite | 247 passed, 8 failed | Initial Windows review; portability and date-sensitive expectations |
+| First rebuild (0.2) | 273 passed | Published baseline; GitHub Actions passed Ubuntu/Windows on Python 3.11/3.12 |
+| Autonomous rebuild (0.3) | **301 passed in 269.94 seconds** | Full suite on Windows, Python 3.12.10, four pytest workers |
+| Focused execution/research/replay checks | 28 passed | Final targeted run before the full suite |
+| Wheel | Built | Python modules, templates and static assets included |
+| Browser | Inspected | Operations and Learning lab; populated monitor with explicitly labelled synthetic UI fixtures, filters, annotations and mobile layout |
+| CI | Configured | Every push runs the full suite and wheel build on Ubuntu/Windows, Python 3.11/3.12; see Actions for release-specific results |
 
-The full suite emitted four instances of the same upstream Starlette/AnyIO
-deprecation warning, one per worker. No test failures or skipped tests remained.
-Offline fixtures explicitly clear inherited paid-feed credentials to avoid
-order-dependent environment leakage. Existing tests were updated for the new
-overview/desk routes and portable permission/process behavior.
+The full local run emitted four instances of an upstream Starlette/AnyIO
+deprecation warning, one per worker. No failures or skips remained. The labelled
+synthetic chart workspace was used only to verify rendering, not as trading or
+performance evidence. Published preview data does not contain those fixtures.
 
 Local execution used workspace-specific temporary and Matplotlib directories.
 This Windows sandbox required a runtime-only temporary-directory mode shim; it
-is not packaged, committed, or required by the application. Python imports were
-pointed at this rebuild. `requirements-tested.txt` records the local Python 3.12
-environment; it is not a universal resolver lock.
+is not packaged or committed. Imports were explicitly pointed at the rebuild.
+requirements-tested.txt records the initial Python 3.12 environment, not a
+universal resolver lock.
 
-## Disposition of the review findings
+## Evidence added in 0.3
 
-These rows map to the original-source findings in [REVIEW.md](REVIEW.md).
-“Implemented” describes the code change and local evidence, not certification of
-all external broker behavior.
+- Execution regression cases exercise cumulative partial fills, duplicate polls,
+  late fees, lost acknowledgements, protection recovery, cancellation/fill races,
+  residual exits, client ownership, and IBKR/Alpaca/MT5 response parsing.
+- Paper cases cover repeated daily snapshots without reusing old extrema and
+  entry-plus-stop ambiguity. Historical replay checks next-bar fills, malformed
+  input, unavailable future data, refusal of current LLM reviewers, and CLI warmup.
+- Research cases cover purged model training, exclusion of shadow-only
+  validation, reserved holdouts, fresh-data requirements, repeated-observation
+  rejection, prospective promotion, configuration invalidation and rollback.
+- Operations cases cover simultaneous scheduled work, credential-free backup
+  content, protected mutation endpoints, structured status and chart P&L.
+- Existing strategy, context, risk, settings, authentication, portfolio,
+  backtest and UI tests remain in the full suite.
 
-| Finding | Rebuild response | Remaining boundary |
-|---|---|---|
-| F01 | Accepted unfilled exits remain tracked; unresolved exits block additional risk | Cancelled/rejected exits and ambiguous timeouts may need operator reconciliation |
-| F02 | Thread/process writer lease, ledger reload and atomic state replacement | Local disk only; broker and JSON writes are not one transaction |
-| F03 | Submission-time sizing, cash/exposure recalculation and pending reservations | Actual fills, fees and external account activity can differ from estimates |
-| F04 | Required missing context fails closed | Optional context is still optional by configuration |
-| F05 | Outcome provenance; estimates cannot authorize automatic learning or risk increases | Complete broker execution/fee reconciliation remains future work |
-| F06 | Halt persisted before broker work; entry paths recheck the flag | An order already in transit cannot be recalled by a local flag |
-| F07 | Daily loss latch survives recovery within the session | Daily-bar research does not replay the intraday latch |
-| F08 | Required research regime inputs block when missing; stale forward-fill removed; empty breadth guarded | Historical universe and classifications are not point-in-time datasets |
-| F09 | Decimal step precision corrected | Only the existing bounded knob set is supported |
-| F10 | Loaded overrides validated against allowlist and bounds | Operator settings still require sound strategy judgment |
-| F11 | Proposal-only default; fresh evidence; at most one conservative opt-in tightening; no automatic shadow loosening/reversion | Observational evidence is not causal proof; untouched holdout evaluation remains necessary |
-| F12 | Next-session-open execution, affordability/cost allowance, heat/theme limits and failed-breakout exits | Daily bars cannot establish intraday event order or full live parity |
-| F13 | Baseline fallback, fold/grid validation and first-day OOS return preserved | Folds reset holdings and are independent experiments |
-| F14 | Public-bind password requirement, browser origin validation and trusted ASGI identity | Deployment must configure TLS, trusted proxies and host ACLs correctly |
-| F15 | Nonfinite values rejected in sizing/configuration, statistics and relevant validation paths | External schema validation continues at adapter boundaries |
-| F16 | Unique atomic temporary files and coordinated paid-request budget reservation | Not a distributed store; health counters remain best-effort telemetry |
-| F17 | New overview, journal, navigation and design system; plans/orders/evidence labels corrected | Some advanced legacy forms remain dense; no fabricated performance charts |
-| F18 | Correct dev dependency, tested dependency snapshot, CI matrix and container process supervision | Docker and external deployment were not executed locally |
+## Disposition of the original review
 
-## What was not verified
+See [REVIEW.md](REVIEW.md) for the historical findings. F01/F03/F05 now have durable
+order intents, cumulative execution reconciliation, partial-fill accounting and
+explicit cost provenance. F02/F06/F07/F14/F15/F16 retain coordinated writes,
+persistent halts/loss latches, authentication and input validation. F08/F12/F13
+have conservative next-open daily execution plus a chronological intraday replay
+path. F09/F10/F11 now have bounded experiments, trained outcome coefficients,
+reserved historical evaluation, prospective comparison, canary deployment and
+automatic rollback. F17 adds Operations, Market monitor and the updated Learning
+lab. F18 adds the local process supervisor and an operating runbook.
 
-No live orders, paid-feed calls, model-provider calls, broker paper-account
-certification or historical profitability study were performed. The review and
-rebuild do not establish improved returns. Partial entry fills, bracket-order
-replacement, symbol-wide cancellation, broker-inferred exit prices and ambiguous
-API timeouts remain material integration work. See [ARCHITECTURE.md](ARCHITECTURE.md).
+These statements describe tested code behavior, not certification of every
+external account, instrument or API failure mode.
 
-The proposed long-term improvements in the review are a roadmap, not a claim
-that every feature was delivered. Full execution-event storage, point-in-time
-datasets, causal evaluation, uninterrupted portfolio walk-forward simulation
-and richer performance visualization remain subsequent projects.
+## Remaining boundaries
+
+No real broker account certification, live orders, paid-feed calls, model-provider
+calls or historical profitability study were performed. The test suite does not
+establish improved returns. Configure and validate the IBKR paper account before
+enabling live execution.
+
+Broker reconciliation is implemented for the common long-equity order lifecycle.
+Statement adjustments, corporate actions, execution busts and financing are not
+fully automated. Finite broker history can leave old acknowledgements unresolved;
+these block new risk. Alpaca's adapter does not have complete settled fee data,
+so unknown costs cannot authorize completion of a live canary. MT5 profit targets
+depend on controller availability; attached stop protection is broker-side.
+
+Daily OHLC cannot reveal intraday event ordering. Replay improves time resolution
+when supplied actual intraday data; it does not reconstruct queue position,
+liquidity, spread, point-in-time universes or unavailable historical context.
+The current strategy scans US-listed long equities; options research supplies
+stock leads, not an options execution engine or worldwide multi-asset strategy.
+
+Learning trains supervised outcome weights and tests bounded strategy changes.
+It is not reinforcement learning or LLM fine-tuning. Observational outcomes and
+repeated trials can still overfit; the block bootstrap and promotion rules are
+conservative heuristics, not a proof of causal improvement. Broker authentication,
+host reliability, off-machine backups and deployment security remain operational
+requirements. See [Architecture](ARCHITECTURE.md), [Learning](LEARNING.md) and
+[Autopilot](AUTOPILOT.md) for exact contracts and recovery steps.
 
 ## Reproduce
 
@@ -74,6 +94,5 @@ python -m pytest tests -q
 python -m pip wheel . --no-deps --wheel-dir dist
 ```
 
-For the tested dependency versions on Python 3.12, install
-`requirements-tested.txt` first. Windows file modes use platform-appropriate
-assertions; POSIX private-file checks still require mode 0600.
+Windows uses platform-appropriate permission assertions; POSIX private-file
+checks still require mode 0600.

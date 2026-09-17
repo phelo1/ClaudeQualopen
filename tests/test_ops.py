@@ -110,7 +110,7 @@ def test_session_cycle_writes_report_and_charts(tmp_path, csv_universe):
     d = Daemon(sess, rebuild_universe=False)
     # Fri 11 Sep 2026 08:00 .. Mon 14 Sep: the tiered weekday tasks plus the Saturday insider scan.
     names = {name for _, name in d.schedule(datetime(2026, 9, 11, 8, 0, tzinfo=NY), days=3)}
-    assert names == {"premarket", "post_open", "focused", "movers", "after_close", "insider_scan", "learn"}
+    assert names == {"premarket", "post_open", "focused", "movers", "after_close", "insider_scan", "learn", "research", "reconcile", "housekeeping"}
     d.run_task("after_close")
     task = next(t for t in d.tasks if t.name == "after_close")
     assert task.runs == 1 and task.last_error is None

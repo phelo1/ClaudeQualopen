@@ -28,7 +28,7 @@ import json
 from .persistence import atomic_text, atomic_json, serialized
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +45,7 @@ from .halt import halt_reason, halt_status, set_halt
 from .health import ConnectionRegistry, describe_connections, price_freshness
 from .market_calendar import NY
 from .regime import regime_snapshot
+from .redact import describe_error
 from .providers import ProviderStore
 from .settings import SettingsStore
 from .setups import Signal
@@ -164,6 +165,9 @@ class TradingSession:
         self.gatherer: ContextGatherer | None = None
         self._broker: Broker | None = None
         self._settings_signature: tuple = ()
+        self._research_thread = None
+        self._observe_thread = None
+        self.autonomy_policy = {"id": "baseline", "overrides": {}, "model": None}
         self.freshness: dict = {}
         self.reload_settings(force=True)
 
@@ -174,10 +178,11 @@ class TradingSession:
         the context gatherer and the resolved data source; a broker connection
         is re-opened lazily so new credentials take effect on the next call.
         """
-        signature = self.store.signature() + (self._overrides_signature(),)
+        signature = self.store.signature() + (self._overrides_signature(), self._autonomy_signature())
         if not force and signature == self._settings_signature:
             self.refresh_data_source()
             return False
+        connections_changed = force or self._settings_signature is None or signature[:2] != self._settings_signature[:2]
         self._settings_signature = signature
         self.store.apply_env()
         self.providers.activate()
@@ -189,7 +194,7 @@ class TradingSession:
         # Learned knob values (qmag.learning) sit on top of the operator's
         # settings - but under explicit CLI overrides - while auto_apply is on.
         self.learned_overrides = {}
-        if self.cfg.learning.enabled and self.cfg.learning.auto_apply:
+        if self.cfg.learning.enabled and self.cfg.learning.auto_apply and not self.cfg.autonomy.enabled:
             from .learning import load_overrides
 
             learned = {k: v for k, v in load_overrides(self.state_dir).items() if k not in self.s.overrides}
@@ -199,6 +204,12 @@ class TradingSession:
                     self.learned_overrides = learned
                 except Exception as exc:  # pragma: no cover - a corrupt overrides file must not stop trading
                     log.warning("ignoring learning overrides: %s", exc)
+        self.operator_cfg = self.cfg
+        from .autonomy import active_policy
+        self.autonomy_policy = active_policy(self.state_dir, self.operator_cfg)
+        automatic = {k: v for k, v in self.autonomy_policy.get("overrides", {}).items() if k not in self.s.overrides}
+        if automatic:
+            self.cfg = self.cfg.with_overrides(automatic)
         self.gatherer = (
             ContextGatherer(
                 self.cfg, cache_path=self.state_dir / "context_cache.json", registry=self.health, uw_cache_path=self.state_dir / "uw_cache.json"
@@ -206,7 +217,9 @@ class TradingSession:
             if self.cfg.context.enabled
             else None
         )
-        if self.s.broker != "paper":
+        if self.s.broker != "paper" and connections_changed:
+            if self._broker is not None and hasattr(self._broker, "ib"):
+                self._broker.ib.disconnect()
             self._broker = None
         return True
 
@@ -218,6 +231,77 @@ class TradingSession:
         if before and before != self.s.data:
             log.info("price data source: %s -> %s", before, self.s.data)
         return self.s.data
+
+    def _autonomy_signature(self):
+        path = self.state_dir / "autonomy.json"
+        return (path.stat().st_mtime_ns, path.stat().st_size) if path.exists() else None
+
+    def start_research(self) -> dict:
+        """Run expensive discovery outside the trading writer lease."""
+        import threading
+        from .autonomy import research
+        if self._research_thread and self._research_thread.is_alive():
+            return {"started": False, "reason": "research already running"}
+        if not self.cfg.autonomy.enabled:
+            return {"started": False, "reason": "autonomy disabled"}
+        def work():
+            try:
+                settings = SessionSettings(**asdict(self.s))
+                independent = TradingSession(settings)
+                frames, _ = independent.load(max_age_hours=24)
+                state = independent.state()
+                result = research(self.state_dir, frames, independent.operator_cfg, state.closed, state.shadow)
+                self.health.record("autonomy", True, detail=str(result.get("status")))
+            except Exception as exc:
+                self.health.record("autonomy", False, error=describe_error(exc))
+                self.alerts.failure("autonomous research", describe_error(exc), key="autonomy-research")
+        self._research_thread = threading.Thread(target=work, daemon=True, name="qmag-research")
+        self._research_thread.start()
+        return {"started": True}
+
+    def observe_trial(self, frames, report, live):
+        from .autonomy import read, observe
+        trial = read(self.state_dir).get("trial")
+        if not self.cfg.autonomy.enabled or not trial or trial.get("status") not in ("forward", "canary", "monitoring"):
+            return
+        # Consume every observation in order. This runs after the real account's
+        # cycle and does no network research, avoiding dropped asynchronous ticks.
+        try:
+            before = read(self.state_dir).get("active", {}).get("id")
+            result = observe(self.state_dir, frames, self.operator_cfg, report, live, self.s.live, self.state().closed)
+            after = result.get("active", {}).get("id")
+            if before != after:
+                self.alerts.send("Automatic strategy change", f"Policy {before} -> {after}; see Learning lab", level="info")
+        except Exception as exc:
+            self.health.record("autonomy", False, error=describe_error(exc))
+
+    @serialized
+    def reconcile_orders(self) -> dict:
+        """Recover executions and protection even when the price provider is down."""
+        from .executions import reconcile, capable
+        from .trader import ensure_exit_orders
+        from types import SimpleNamespace
+        self.reload_settings()
+        state = self.state()
+        state._persistence_path = self.state_dir / "trader.json"
+        actions = []
+        if not capable(self.broker):
+            return {"ok": False, "issues": ["Broker has no execution snapshot adapter"]}
+        reconcile(self.broker, state, self.cfg, str(pd.Timestamp.now(tz=NY).date()), actions)
+        held = self.broker.positions()
+        for symbol, row in list(state.managed.items()):
+            if any(issue.startswith(symbol+":") for issue in state.reconciliation.get("issues", [])):
+                continue
+            pos = ManagedPosition(**row)
+            actual = held.get(symbol)
+            if (actual.qty if actual else 0) != pos.remaining:
+                state.reconciliation["issues"].append(f"{symbol}: broker position differs from execution ledger")
+            elif pos.remaining and not pos.pending_exit:
+                ensure_exit_orders(self.broker, pos, SimpleNamespace(actions=actions), state)
+        state.reconciliation["ok"] = not state.reconciliation.get("issues")
+        state.save(self.state_dir / "trader.json")
+        self.health.record("execution_reconciliation", state.reconciliation["ok"], detail="; ".join(actions[-5:]), error="; ".join(state.reconciliation.get("issues", [])) or None)
+        return state.reconciliation
 
     def _overrides_signature(self) -> tuple | None:
         from .learning import OVERRIDES_FILE
@@ -241,7 +325,7 @@ class TradingSession:
         if self._broker is None:
             try:
                 if self.s.broker == "paper":
-                    self._broker = make_broker("paper", state_path=self.state_dir / "ledger.json", starting_cash=self.cfg.risk.starting_equity)
+                    self._broker = make_broker("paper", state_path=self.state_dir / "ledger.json", starting_cash=self.cfg.risk.starting_equity, slippage_bps=self.cfg.risk.slippage_bps, commission_per_share=self.cfg.risk.commission_per_share)
                 else:
                     self._broker = make_broker(self.s.broker)
             except Exception as exc:
@@ -249,6 +333,7 @@ class TradingSession:
                 raise
         return self._broker
 
+    @serialized
     def account(self):
         """Read the broker account, recording the outcome. Raises if the broker is unreachable."""
         return self.health.record_result("broker", self.broker.account, detail=f"{self.s.broker}: account read")
@@ -334,6 +419,7 @@ class TradingSession:
             self.account()  # fail loudly (and record it) before touching any state
             state = TraderState.load(self.state_path)
             state._persistence_path = self.state_path
+            state.policy = self.autonomy_policy
             clock = now if (now is not None or asof) else datetime.now(NY)
             report = run_cycle(
                 frames, self.broker, cfg, state, asof=pd.Timestamp(asof) if asof else None, gatherer=self.gatherer, block_new_entries=block,
@@ -343,6 +429,7 @@ class TradingSession:
             self.health.record_llm(report.plans + report.rejected)
             self._record_regime(report)
             self.write_report(report, frames, cfg, label=label)
+            self.observe_trial(frames, report, LiveClock(now=clock))
         except Exception as exc:
             self.health.record("cycle", False, detail=label, error=f"{type(exc).__name__}: {exc}", latency_ms=(time.perf_counter() - t0) * 1000)
             self.alerts.failure(f"{label} cycle", f"{type(exc).__name__}: {exc}", key=f"cycle-fail:{label}:{datetime.now(NY).date()}")
@@ -358,6 +445,8 @@ class TradingSession:
         """Arming list + open positions + resting entries + screener hits (no aux symbols)."""
         state = self.state()
         scope = set(state.arming) | set(state.managed) | set(state.pending) | {s.upper() for s in (extra or [])}
+        from .monitor import research_symbols
+        scope |= research_symbols(self.state_dir)
         return sorted(s for s in scope if s not in self.cfg.auxiliary_symbols)
 
     @serialized
@@ -423,6 +512,7 @@ class TradingSession:
             self.account()
             state = TraderState.load(self.state_path)
             state._persistence_path = self.state_path
+            state.policy = self.autonomy_policy
             report = run_cycle(
                 frames, self.broker, cfg, state, asof=pd.Timestamp(asof) if asof else None, gatherer=self.gatherer, block_new_entries=block,
                 scan_symbols=set(scope), regime=regime, full_scan=False, pre_actions=pre_actions, screen_hits=screen_hits, label=label, live=live,
@@ -431,6 +521,7 @@ class TradingSession:
             state.save(self.state_path)
             self.health.record_llm(report.plans + report.rejected)
             self.write_report(report, frames, cfg, label=label)
+            self.observe_trial(frames, report, live)
         except Exception as exc:
             self.health.record("cycle", False, detail=label, error=f"{type(exc).__name__}: {exc}", latency_ms=(time.perf_counter() - t0) * 1000)
             self.alerts.failure(f"{label} pass", f"{type(exc).__name__}: {exc}", key=f"cycle-fail:{label}:{datetime.now(NY).date()}")
@@ -563,7 +654,7 @@ class TradingSession:
         state = TraderState.load(self.state_path)
         state._persistence_path = self.state_path
         try:
-            report = review(state, self.cfg, self.state_dir, now=now, apply=apply, ai=ai, registry=self.health)
+            report = review(state, self.cfg, self.state_dir, now=now, apply=False if self.cfg.autonomy.enabled else apply, ai=ai, registry=self.health)
         except Exception as exc:
             self.health.record("learning", False, detail="review", error=f"{type(exc).__name__}: {exc}", latency_ms=(time.perf_counter() - t0) * 1000)
             raise
@@ -610,6 +701,16 @@ class TradingSession:
         payload["freshness"] = self.freshness
         payload["config"] = cfg.to_dict()
         payload["charts"] = {}
+        try:
+            from .autonomy import monitor_deployment
+            monitor_deployment(self.state_dir, self.operator_cfg, report.equity)
+        except Exception as exc:
+            self.health.record("autonomy", False, error=describe_error(exc))
+        try:
+            from .monitor import capture
+            capture(self.state_dir, frames, report, self.state())
+        except Exception as exc:
+            self.health.record("monitor", False, error=describe_error(exc))
         if report.scan != "full":
             # A focused pass only loaded a handful of names: theme ranks and the
             # universe size come from the latest full scan, labelled as such.
@@ -645,6 +746,7 @@ class TradingSession:
             log.warning("account snapshot failed: %s", exc)
         return payload
 
+    @serialized
     def account_snapshot(self, frames: dict[str, pd.DataFrame] | None = None, fetch_missing: bool = True) -> dict:
         """Write ``account.json``: the broker's equity, cash and every holding
         marked at the latest real bar (see ``qmag.accounts``)."""
@@ -671,7 +773,7 @@ class TradingSession:
             path = chart_signal(enriched[plan.symbol], sig, self.chart_dir, target=plan.partial_target, shares=plan.shares or None, note=note)
             out[plan.symbol] = str(path)
         for pos in report.open_positions:
-            if pos.symbol not in enriched or pos.symbol in out:
+            if pos.symbol not in enriched:
                 continue
             levels = ChartLevels(
                 entry=pos.entry_price, stop=pos.stop, target=None if pos.partial_done else pos.target, pivot=pos.pivot,
@@ -941,12 +1043,17 @@ class TradingSession:
         features.update(manual=True, override=bool(problems), override_reasons=problems)
         if self.halted():
             raise ManualTradeRefused(self.halted())
-        order = broker.market_buy(symbol, plan.shares, tag=f"manual:{symbol}")
+        import uuid
+        tag = "qmag-" + uuid.uuid4().hex[:24]
         pending = PendingPlan(
-            symbol, sig.setup, asof, float(plan.entry), float(plan.stop), int(plan.shares), order.id, entry_kind="market",
+            symbol, sig.setup, asof, float(plan.entry), float(plan.stop), int(plan.shares), "", client_tag=tag, entry_kind="market",
             target=plan.partial_target, partial_qty=plan.partial_qty, theme=plan.theme, plan=plan.to_dict(), features=features,
         )
         report = CycleReport(asof=asof, regime_ok=bool(out["regime_ok"]), equity=0.0, broker=getattr(broker, "name", self.s.broker), scan="manual", entry_mode=cfg.entry.mode)
+        state.pending[symbol] = asdict(pending)
+        state.checkpoint()
+        order = broker.market_buy(symbol, plan.shares, tag=tag)
+        pending.order_id = order.id
         state.pending[symbol] = asdict(pending)
         state.checkpoint()
         filled = _await_fill(broker, order, symbol)
@@ -960,7 +1067,7 @@ class TradingSession:
         else:
             qty, avg = filled
             pos = _adopt(state, pending, qty, avg, asof, cfg)
-            ensure_exit_orders(broker, pos, report)
+            ensure_exit_orders(broker, pos, report, state)
             result["filled"] = {"qty": qty, "avg_price": round(avg, 4)}
             result["stop"], result["target"] = float(pos.stop), pos.target  # re-anchored to the actual fill
             tgt = f", target {pos.target:.2f}" if pos.target else ""

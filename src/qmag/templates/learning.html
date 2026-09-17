@@ -47,12 +47,29 @@
 
 {% block content %}
 <main>
+  <div class="page-heading col-12"><div><div class="eyebrow">CONTINUOUS IMPROVEMENT</div><h1>Learning lab</h1><p class="m">Research, prospective validation, automatic promotion and rollback.</p></div><button id="research-now">Run research</button></div>
+  <section class="col-12">
+    <div class="ops-flow">Backtest candidates <span>→</span> Train weights <span>→</span> Forward trial <span>→</span> Canary <span>→</span> Monitor & revert</div>
+    <div class="stats"><div class="stat"><div class="k">Controller</div><div class="v sm">{{ 'Automatic' if controls.enabled and controls.auto_promote else 'Observe only' }}</div></div><div class="stat"><div class="k">Active policy</div><div class="v sm">{{ autonomy.active.id }}</div></div><div class="stat"><div class="k">Research</div><div class="v sm">{{ autonomy.research.status|replace('_',' ') }}</div></div><div class="stat"><div class="k">Model</div><div class="v sm">{{ autonomy.get('model_training',{}).get('status','Collecting outcomes') }}</div></div></div>
+    <p>Selection settings are tested in chronological backtests. A fitted return model learns weights from recorded entry conditions and resolved outcomes. Baseline and challenger then run in separate paper accounts on newly arriving observations. Passing trials promote automatically; live deployment starts at {{ '%.0f'|format(controls.canary_risk_fraction*100) }}% of the normal per-trade risk budget.</p>
+    {% if autonomy.trial %}{% set trial=autonomy.trial %}
+      <h2>Current experiment <span class="pill">{{ trial.status|replace('_',' ') }}</span></h2>
+      <div class="stats"><div class="stat"><div class="k">Observed sessions</div><div class="v">{{ trial.get('evaluation',{}).get('days',0) }} <small>/ {{ controls.min_forward_days }}</small></div></div><div class="stat"><div class="k">Candidate closes</div><div class="v">{{ trial.get('trades',{}).get('candidate',0) }} <small>/ {{ controls.min_forward_trades }}</small></div></div><div class="stat"><div class="k">Policy</div><div class="v sm">{{ trial.candidate.kind|replace('_',' ') }}</div></div></div>
+      {% if trial.coverage_gaps %}<div class="evidence-callout"><b>Promotion blocked by incomplete observations</b><p>{{ trial.coverage_gaps|join(' · ') }}</p></div>{% endif %}
+      <p class="m">Promotion also requires a positive lower confidence bound on paired daily return improvement, sufficient return lift and acceptable drawdown. Multiple intraday polls do not count as independent days.</p>
+    {% else %}<div class="empty">The controller is collecting evidence. Research runs weekly while the daemon is running. {{ autonomy.research.get('reason','A challenger appears here when a candidate passes discovery validation.') }}</div>{% endif %}
+    {% if autonomy.history %}<h3>Policy history</h3><div class="table-wrap"><table><thead><tr><th>Event</th><th>Policy</th><th>Time</th></tr></thead><tbody>{% for event in autonomy.history[-10:]|reverse %}<tr><td>{{ event.event|replace('_',' ') }}</td><td>{{ event.id }}</td><td>{{ event.at }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+    {% set fitted = autonomy.get('model_training',{}) %}
+    {% if fitted.get('weights') %}<details><summary>Trained model · {{ fitted.status }} · {{ fitted.training_rows }} training / {{ fitted.validation_rows }} validation outcomes</summary><p class="m">Standardized feature coefficients describe associations with R, not causal explanations. Validation error {{ '%.3f'|format(fitted.validation_mse) }} versus baseline {{ '%.3f'|format(fitted.baseline_mse) }}.</p><div class="table-wrap"><table><thead><tr><th>Entry feature</th><th>Fitted weight</th></tr></thead><tbody>{% for feature in fitted.features %}<tr><td>{{ feature|replace('_',' ') }}</td><td>{{ '%+.4f'|format(fitted.weights[loop.index0]) }}</td></tr>{% endfor %}</tbody></table></div></details>{% endif %}
+    <p class="m">This is supervised model training plus automated strategy experimentation. Shadow fills remain counterfactual evidence. No method guarantees that an improvement will persist.</p><output id="research-result" aria-live="polite"></output>
+  </section>
+
   {% if run.error %}<div class="flash err">Last manual review failed <span class="what">— {{ run.error }}</span></div>{% endif %}
 
   <section class="col-8">
     <h2>Learning from the journal <span class="m sub">what worked, what did not, and why — then one careful step at a time</span></h2>
-    <p class="m">This is a research review of selection thresholds, not model training. The rules generate hypotheses; the AI coach explains them. Neither proves an edge.</p>
-    <div class="evidence-callout"><b>{{ 'Restricted auto-application enabled' if ln.auto_apply else 'Proposal-only mode' }}</b><p>Paper fills, estimated exits and shadow trades are exploratory evidence. Automatic changes require at least 30 fresh, broker-verified executions in the affected band, a negative upper confidence bound, and an explicit opt-in. Only one tightening can be applied per review. Shadow-based loosenings and reversions remain proposals.</p></div>
+    <p class="m">The journal review below supplies explanations and research hypotheses to the autonomous workflow above. It does not itself fit the outcome model.</p>
+    <div class="evidence-callout"><b>Journal review · {{ 'Discovery input' if controls.enabled else 'Legacy review' }}</b><p>Paper fills, estimated exits and shadow trades are exploratory evidence. The autonomous controller tests both tighter and looser settings, and can deploy or revert them after prospective validation. Journal proposals alone do not change the active strategy.</p></div>
     {% if report and report.evidence %}<div class="stats"><div class="stat"><div class="k">Broker-verified records</div><div class="v">{{ report.evidence.verified }}</div></div><div class="stat"><div class="k">Exploratory records</div><div class="v">{{ report.evidence.other }}</div></div></div>{% endif %}
     {% if report %}
     <div class="stats">
@@ -83,7 +100,7 @@
     <h2>Guard rails</h2>
     <div class="disclaimer">
       These are observational comparisons, not causal effects. Shadow outcomes use a simplified fill model and cannot authorize changes. Applied tightenings require fresh verified evidence; the same historical trades cannot be reused after a change. At most one knob moves per review, inside its declared bounds and outside its cooldown.
-      {% if not ln.auto_apply %}<br><br>Auto-apply is <b>off</b>: adjustments are proposed only. Turn it on in <a href="/settings">settings → Learning</a>.{% endif %}
+      <br><br>Autonomous promotion is configured separately in <a href="/settings">settings → Autonomy</a>. Legacy review auto-application is ignored while the autonomous controller is enabled.
     </div>
     <h2 style="margin-top:14px">Knobs the review may move</h2>
     {% for k in knobs %}
@@ -292,7 +309,7 @@
 </main>
 {% endblock %}
 
-{% block scripts %}
+{% block scripts %}<script>document.getElementById('research-now').onclick=async()=>{const b=document.getElementById('research-now');b.disabled=true;try{const r=await fetch('/api/autonomy/research',{method:'POST'});if(!r.ok)throw Error('Research could not start');const x=await r.json();document.getElementById('research-result').textContent=x.started?'Research started. Results appear here when complete.':x.reason;}catch(e){document.getElementById('research-result').textContent=e.message;}finally{b.disabled=false;}};</script>
 <script>
   const btn = document.getElementById('run-learn');
   if (btn) btn.addEventListener('click', async () => {

@@ -1,51 +1,36 @@
-# Architecture and operating boundaries
+# Current architecture and execution boundaries
 
-ClaudeQual is a rules-driven momentum research and execution workspace, not a trained trading model. The original detectors, providers, CLI, broker adapters, options analysis and AI tools remain available. The rebuild changes risk boundaries, research timing, evidence policy and the interface.
+`TradingSession` coordinates the data, strategy, portfolio state and broker. `run_cycle` detects setups, applies data/regime/context/portfolio gates, ranks and sizes plans, submits entries, and manages stops/targets/time/trend exits. A fixed US equity calendar drives full scans, focused scans and research. Options-flow research supplies stock leads to that same gated workflow.
 
-```mermaid
-flowchart LR
-    A[Real price and context providers] --> B[Freshness and normalization]
-    B --> C[Setup detectors]
-    C --> D[Deterministic gates and sizing]
-    D --> E[Optional AI review]
-    E --> F[Recheck capital, halt and portfolio limits]
-    F --> G[Order acknowledgement]
-    G --> H[Execution reconciliation]
-    H --> I[Position management and journal]
-    I --> J[Research review and proposals]
-    J -. restricted opt-in .-> D
-```
+## Durable execution
 
-| Layer | Main modules | Responsibility |
+Entries, market exits and protective replacements write an intent before submission. Unique client tags let a later pass recover an acknowledgement lost in transport. Unknown orders remain unresolved and block new risk. Cumulative execution snapshots are recorded in `trader.json`; repeated polls do not double-count fills. Partial entries and exits, terminal cancellations/rejections and late commissions are reconciled. Protection replacement requires owned-order cancellation acknowledgement and checks for quantity changes during cancellation. Closed positions cancel residual owned exits.
+
+The current contract is aggregate per order, not a full event-sourced exchange ledger. Persisted terminal snapshots bridge finite API history, but unresolved orders older than available broker history need external reconciliation. Legacy positions without entry IDs are not upgraded to verified executions. Non-USD accounts need valid conversion; unknown conversion blocks new USD risk. Corporate actions, execution corrections/busts, financing and all statement-level adjustments are not fully automated.
+
+| Adapter | Implemented behavior | Remaining external boundary |
 |---|---|---|
-| Inputs | data, universe, fundamentals, context, uw | Real inputs, freshness, coverage and API budgets |
-| Rules | setups, indicators, themes, regime, sentiment | Candidate detection and eligibility |
-| Decisions | plan, reviewer, llm, rationale | Sizing, gates and optional model opinions |
-| Execution | session, trader, broker, halt | Coordination, orders, reconciliation and management |
-| Persistence | persistence, health, accounts | Atomic replacement and local writer coordination |
-| Research | backtest, optimize, learning, insider | Explicit simulations and observational comparisons |
-| Interface | dashboard, templates, static | Overview, desk, portfolio, journal, learning and configuration |
+| IBKR | Selected account, stable client ID, order-reference recovery, open/completed orders, execution/commission aggregation, OCA exits; connection released at the end of the desk writer lease so dashboard and daemon can share the client ID | TWS/Gateway authentication, market permissions, account variants, finite execution history and installed SDK/server versions require account-level validation |
+| Alpaca | Client-order-ID recovery, cumulative partial fills, order status/legs, native bracket/OCO cancellation | Order responses do not supply complete commission/fee settlement in this adapter; unknown costs remain unknown and prevent automatic completion of a live canary |
+| MT5 | Order/deal history, position-linked stop exits, native attached protective SL, controller-driven partial profit taking, hedge-ticket close sizing, reported currency and costs | Requires Windows terminal and broker-specific symbols/lots. Profit taking depends on controller availability; there is deliberately no independent SELL_LIMIT pretending to be OCO |
+| Local paper | Persistent simulated fills, slippage/commission settings, conservative stop-first ambiguity, no reuse of earlier daily extrema on repeated snapshots | No exchange queue, spread/liquidity reconstruction or broker certification |
 
-## State and execution
+The adapters are implementation-complete for the common long-equity lifecycle described here, not certified on every broker account/instrument. Use one strategy owner per account/symbol. Order IDs and client IDs must remain stable; do not reset the IBKR sequence or change the desk client ID while positions/intents exist.
 
-Mutating session operations use a reentrant thread/process lease per state directory. Cached paper ledgers refresh at entry. State replacement uses unique temporary files, flush/fsync and `os.replace`. Received order acknowledgements are checkpointed before fill waits or protection. Emergency halts persist before waiting for the writer or contacting a broker; submissions recheck the flag.
+The adapter shapes follow official [IBKR order documentation](https://www.interactivebrokers.com/docs/tws-api/doc/introduction), [Alpaca order methods](https://alpaca.markets/sdks/python/api_reference/trading/orders.html) and [MT5 order-ticket/position deal history](https://www.mql5.com/en/docs/python_metatrader5/mt5historydealsget_py).
 
-These are **single-machine, local-disk** guarantees. Do not share writable state between hosts or put it on a network filesystem. JSON files and the broker API are not one transaction. A timeout can mean an order was accepted without returning an acknowledgement: inspect the broker before retrying.
+## State and concurrency
 
-A plan is not an order, and an acknowledgement is not a fill. An unconfirmed exit stays tracked with `pending_exit`; unresolved exits block more portfolio risk. An externally cancelled/rejected exit may need operator reconciliation. The current adapter contract cannot reconstruct every execution event.
+JSON/YAML files live on one local disk. Atomic replacement and a reentrant cross-process writer lease coordinate dashboard, CLI and scheduler. This is not a distributed transaction: a process can fail after a broker accepts an order and before the response is stored, which is why durable intents and recovery tags exist. Research uses a separate registry lease. Every prospective account has an observation checkpoint; interrupted observations prevent promotion.
 
-Journal evidence distinguishes `paper_fill`, `broker_verified` and `estimated`. Legacy records default to estimated. Verified describes observed price/quantity, **not** certification of all commissions, financing, currency conversion or fees. An inferred partial sale downgrades the resulting record. Bar-inferred closures remain visible but cannot authorize automatic adjustments.
+`qmag autopilot` supervises dashboard/daemon processes. The scheduler preserves due jobs across long tasks, runs all simultaneous jobs, coalesces missed repeating ticks and retries failed work with bounded backoff. Reconciliation runs every five minutes independently of market-data loading. Daily housekeeping creates state backups without credentials; retention only deletes expired backup ZIPs.
 
-Material live boundaries remain: partial entry fills, asynchronous bracket replacement, inferred broker stop/target prices and symbol-wide cancellation. Use a dedicated account/desk and validate the broker's paper environment first. The redesign does not certify unattended live operation.
+## Research fidelity
 
-## Research assumptions
+Daily backtests use completed signals and next-session-open entries. Close-dependent exits also fill at the next available open. New entries cannot spend proceeds from exits that occur later that same day. Stops precede targets when daily OHLC cannot determine ordering. Same-day breakeven activation, queue position, partial fills, actual news availability, corporate actions and historical universe membership remain limitations. `legacy_intrabar` retains explicitly labelled legacy entry behavior for comparisons.
 
-Backtests now execute completed-bar signals at the next available session's open, with costs and a gap limit. `execution_model="legacy_intrabar"` retains the original same-bar assumption for explicitly labelled comparisons. It is not evidence of executable performance.
+`qmag replay` consumes timezone-aware intraday OHLCV bars, aggregates only observations available by the decision time for daily indicators, and executes queued market orders at the next available bar's open. It uses the same trading loop and requires recorded historical context or explicit disabled context. Current language-model reviewers cannot be called during replay. Intraday bars still have internal ambiguity, and a missing bar is not a fabricated fill. Local replay alone cannot promote a strategy.
 
-The engines share sizing, heat/theme constraints and early failed-breakout behavior, but daily research does not replay intraday volume confirmation, live AI/context, the intraday daily-loss latch, latency or queue priority. Stop/target ordering and closing-price exits remain daily-bar assumptions. Final open positions are marked, not forcibly closed. Walk-forward folds reset positions; the stitched curve represents independent experiments, not an uninterrupted account.
+## Security and agent access
 
-## Security
-
-Public binds require a dashboard password. Cross-origin browser mutations are refused; authenticated bearer API clients remain supported. Forwarded identity/scheme headers must be resolved by Uvicorn's trusted-proxy configuration. Browser-supplied forwarding headers are not trusted by the application. Pages prevent framing and account-data caching. POSIX private files retain mode 0600; Windows installations need appropriate NTFS directory ACLs.
-
-AI outputs remain inside deterministic halt, sizing and portfolio controls. Enabling a model neither trains its weights nor establishes a statistical trading edge.
+Public dashboard binds require a password. Authentication covers API/static routes with existing login/health exemptions. Cross-origin mutations are rejected; bearer clients are supported. Maintenance endpoints expose structured, scoped actions rather than arbitrary code execution. Secrets are redacted and excluded from maintenance backups. POSIX private files use mode 0600; Windows operators must use appropriate directory ACLs. Risk limits, live opt-in and the persistent kill switch remain authoritative.

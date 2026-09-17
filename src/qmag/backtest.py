@@ -15,8 +15,8 @@ Regime: no new entries while the benchmark closed below its SMA yesterday.
 
 Conservative conventions: the entry-day low is checked against the stop
 (as if the low printed after the fill), and slippage is applied to every
-fill. Default entries use previously completed signals. Closing-price exits and
-intraday stop/target ordering remain daily-bar assumptions.
+fill. Close-dependent exits execute at the next available open. Intraday
+stop/target ordering and breakeven timing remain daily-bar assumptions.
 """
 
 from __future__ import annotations
@@ -60,6 +60,7 @@ class Position:
     exits: list[tuple[pd.Timestamp, int, float, str]] = field(default_factory=list)
     pivot: float | None = None
     theme: str | None = None
+    pending_exit: tuple[int, str] | None = None
 
     def __post_init__(self) -> None:
         self.remaining = self.shares
@@ -281,65 +282,17 @@ def run_backtest(
             del positions[pos.symbol]
 
     for date in dates:
-        # ---- 1. manage open positions ------------------------------------
+        # Completed-close decisions execute at the next available open.
         for sym in list(positions):
             pos = positions[sym]
-            df = data[sym]
-            if date not in df.index:
-                continue
-            row = df.loc[date]
-            pos.bars_held += 1
-            if pos.initial_risk > 0:
-                pos.mfe_r = max(pos.mfe_r, (float(row["high"]) - pos.entry_price) / pos.initial_risk)
-
-            if row["open"] <= pos.stop:
-                close_out(pos, date, pos.remaining, float(row["open"]), "stop_gap")
-                continue
-            if row["low"] <= pos.stop:
-                close_out(pos, date, pos.remaining, pos.stop, "stop")
-                continue
-
-            en = cfg.entry
-            if en.failed_breakout_exit and pos.pivot and not pos.partial_done and pos.bars_held <= en.failed_breakout_days:
-                floor = pos.pivot * (1 - en.failed_breakout_tolerance_pct)
-                if row["close"] < floor and pos.stop < floor:
-                    close_out(pos, date, pos.remaining, float(row["close"]), "failed_breakout")
-                    continue
-
-            # Profit-taking plan: a resting limit at +N R takes the partial
-            # whenever price gets there; otherwise the 3-5 day rule applies.
-            if not pos.partial_done and pos.target is not None and row["high"] >= pos.target:
-                qty = partial_quantity(pos.remaining, mgmt.partial_fraction)
-                if qty > 0:
-                    close_out(pos, date, qty, max(float(row["open"]), pos.target), "partial_target")
-                pos.partial_done = True
-                if mgmt.move_stop_to_breakeven:
-                    pos.stop = max(pos.stop, pos.entry_price)
-                continue
-
-            if (
-                mgmt.time_stop_days > 0 and not pos.partial_done and pos.bars_held >= mgmt.time_stop_days
-                and float(row["close"]) <= pos.entry_price and pos.mfe_r < mgmt.time_stop_min_mfe_r
-            ):
-                close_out(pos, date, pos.remaining, float(row["close"]), "time_stop")
-                continue
-
-            if not pos.partial_done and pos.bars_held >= mgmt.partial_after_days:
-                if row["close"] > pos.entry_price and mgmt.partial_fraction > 0:
-                    qty = partial_quantity(pos.remaining, mgmt.partial_fraction)
-                    if qty > 0:
-                        close_out(pos, date, qty, float(row["close"]), "partial")
+            if pos.pending_exit and date in data[sym].index:
+                qty, reason = pos.pending_exit
+                pos.pending_exit = None
+                close_out(pos, date, min(qty, pos.remaining), float(data[sym].loc[date, "open"]), reason)
+                if sym in positions and reason == "partial":
                     pos.partial_done = True
                     if mgmt.move_stop_to_breakeven:
                         pos.stop = max(pos.stop, pos.entry_price)
-                    continue
-
-            trail = row.get(trail_col, np.nan)
-            if pos.partial_done and not np.isnan(trail) and row["close"] < trail:
-                close_out(pos, date, pos.remaining, float(row["close"]), "trail_ma")
-                continue
-            if pos.bars_held >= mgmt.max_hold_days:
-                close_out(pos, date, pos.remaining, float(row["close"]), "max_hold")
 
         # ---- 2. new entries ---------------------------------------------
         todays = signals_by_date.get(date, [])
@@ -349,7 +302,7 @@ def run_backtest(
             allowed = bool(regime_ok.get(date, False))
         if allowed and todays:
             # Size off yesterday's mark-to-market equity (no lookahead).
-            mtm = equity_curve[-1] if equity_curve else cash
+            mtm = cash + sum(p.remaining * (float(data[s].loc[date, "open"]) if date in data[s].index else float(data[s]["close"].asof(date))) for s, p in positions.items())
             for sig in sorted(todays, key=lambda s: s.score, reverse=True):
                 if len(positions) >= risk.max_positions or sig.symbol in positions:
                     continue
@@ -365,7 +318,7 @@ def run_backtest(
                 per_share_risk = fill - sig.stop
                 if per_share_risk <= 0:
                     continue
-                exposure = sum(positions[s].remaining * positions[s].entry_price for s in positions)
+                exposure = sum(p.remaining * (float(data[s].loc[date, "open"]) if date in data[s].index else float(data[s]["close"].asof(date))) for s, p in positions.items())
                 shares = size_shares(mtm, fill, sig.stop, cfg, exposure, cash)
                 if risk.max_portfolio_heat_pct > 0:
                     heat = sum(max(p.entry_price - p.stop, 0) * p.remaining for p in positions.values())
@@ -388,10 +341,63 @@ def run_backtest(
                 )
                 positions[sig.symbol] = pos
                 signals_taken += 1
-                # Conservative: the entry-day low is tested against the stop.
-                row = data[sig.symbol].loc[date]
-                if row["low"] <= pos.stop:
-                    close_out(pos, date, pos.remaining, pos.stop, "stop_same_day")
+
+        # ---- 1. manage open positions ------------------------------------
+        for sym in list(positions):
+            pos = positions[sym]
+            df = data[sym]
+            if date not in df.index:
+                continue
+            row = df.loc[date]
+            pos.bars_held += int(date > pos.entry_date)
+            if pos.initial_risk > 0:
+                pos.mfe_r = max(pos.mfe_r, (float(row["high"]) - pos.entry_price) / pos.initial_risk)
+
+            if row["open"] <= pos.stop:
+                close_out(pos, date, pos.remaining, float(row["open"]), "stop_gap")
+                continue
+            if row["low"] <= pos.stop:
+                close_out(pos, date, pos.remaining, pos.stop, "stop")
+                continue
+
+            # Profit-taking plan: a resting limit at +N R takes the partial
+            # whenever price gets there; otherwise the 3-5 day rule applies.
+            if not pos.partial_done and pos.target is not None and row["high"] >= pos.target:
+                qty = partial_quantity(pos.remaining, mgmt.partial_fraction)
+                if qty > 0:
+                    close_out(pos, date, qty, max(float(row["open"]), pos.target), "partial_target")
+                pos.partial_done = True
+                if mgmt.move_stop_to_breakeven:
+                    pos.stop = max(pos.stop, pos.entry_price)
+                continue
+
+            en = cfg.entry
+            if en.failed_breakout_exit and pos.pivot and not pos.partial_done and pos.bars_held <= en.failed_breakout_days:
+                floor = pos.pivot * (1 - en.failed_breakout_tolerance_pct)
+                if row["close"] < floor and pos.stop < floor:
+                    pos.pending_exit = (pos.remaining, "failed_breakout")
+                    continue
+
+            if (
+                mgmt.time_stop_days > 0 and not pos.partial_done and pos.bars_held >= mgmt.time_stop_days
+                and float(row["close"]) <= pos.entry_price and pos.mfe_r < mgmt.time_stop_min_mfe_r
+            ):
+                pos.pending_exit = (pos.remaining, "time_stop")
+                continue
+
+            if not pos.partial_done and pos.bars_held >= mgmt.partial_after_days:
+                if row["close"] > pos.entry_price and mgmt.partial_fraction > 0:
+                    qty = partial_quantity(pos.remaining, mgmt.partial_fraction)
+                    if qty > 0:
+                        pos.pending_exit = (qty, "partial")
+                    continue
+
+            trail = row.get(trail_col, np.nan)
+            if pos.partial_done and not np.isnan(trail) and row["close"] < trail:
+                pos.pending_exit = (pos.remaining, "trail_ma")
+                continue
+            if pos.bars_held >= mgmt.max_hold_days:
+                pos.pending_exit = (pos.remaining, "max_hold")
 
         # ---- 3. mark to market -------------------------------------------
         value = cash

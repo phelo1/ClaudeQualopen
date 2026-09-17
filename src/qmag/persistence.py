@@ -107,6 +107,17 @@ def serialized(method):
                 try:
                     return method(self, *args, **kwargs)
                 finally:
+                    # IBKR order IDs are scoped to the desk's fixed client ID.
+                    # Release its socket before another process/thread holding
+                    # this same desk lease connects (dashboard and daemon).
+                    broker = getattr(self, '_broker', None)
+                    if broker is not None and str(getattr(broker, 'name', '')).startswith('ibkr') and hasattr(broker, 'ib'):
+                        try:
+                            broker.ib.disconnect()
+                        except Exception:
+                            pass  # discard the socket and reconnect at the next operation
+                        finally:
+                            self._broker = None
                     self._inside_write = False
             return method(self, *args, **kwargs)
     return wrapped

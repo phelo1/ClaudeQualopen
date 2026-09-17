@@ -892,6 +892,8 @@ def daemon(
         return
     if once:
         result = d.run_task(once)
+        if once == "research" and sess._research_thread:
+            sess._research_thread.join()
         if isinstance(result, CycleReport):
             _print_report(sess, result)
         elif isinstance(result, dict) and once == "insider_scan":
@@ -1273,6 +1275,52 @@ def paper_status(state_dir: Path = typer.Option(Path("paper_state"))):
         for r in state.closed[-20:]:
             t.add_row(r["symbol"], r["setup"], r["entry_date"], f"{r['entry_price']:.2f}", r.get("closed_on", ""), r.get("exit_reason", "stop/manual"))
         console.print(t)
+
+
+@app.command("replay")
+def replay_command(
+    intraday_dir: Path = typer.Option(..., help="One SYMBOL.csv per stock; timezone-aware timestamp, OHLCV"),
+    daily_dir: Path = typer.Option(..., help="Daily OHLCV CSV directory for indicator warmup"),
+    output: Path = typer.Option(..., help="Fresh experiment directory"),
+    config: Optional[Path] = ConfigOpt,
+    bar_minutes: int = typer.Option(1),
+    context_file: Optional[Path] = typer.Option(None, help="JSON array of timestamped historical context events"),
+):
+    """Replay real intraday bars through the same execution / strategy loop offline."""
+    from .replay import load_intraday, replay
+    frames = load_intraday(intraday_dir)
+    provider = make_provider("csv", directory=str(daily_dir))
+    history = provider.load(list(frames))
+    cfg = build_config(config, None, True, {})
+    events = json.loads(context_file.read_text(encoding="utf-8")) if context_file else None
+    result = replay(frames, history, cfg, output, bar_minutes, events)
+    console.print(f"Replayed {result['observations']} observations. Artifact: {output / 'replay.json'}")
+
+
+@app.command("operations")
+def operations_command(state_dir: Path = StateDirOpt):
+    """Read structured status for humans and agents without contacting a broker."""
+    from .operations import status
+    print(json.dumps(status(state_dir), indent=2))
+
+
+@app.command("housekeeping")
+def housekeeping_command(state_dir: Path = StateDirOpt):
+    """Back up execution / research state; exclude credentials and preserve journals."""
+    from .operations import housekeeping
+    print(json.dumps(housekeeping(state_dir), indent=2))
+
+
+@app.command("autopilot")
+def autopilot_command(
+    broker: str = BrokerOpt, data: str = DataOpt, state_dir: Path = StateDirOpt,
+    config: Optional[Path] = ConfigOpt, port: int = typer.Option(8765),
+    yes_live: bool = YesLiveOpt,
+):
+    """Supervise the scheduler and local dashboard together; restart failed services."""
+    from .supervisor import run
+    _confirm_live(broker, yes_live)
+    run(broker=broker, data=data, state_dir=state_dir, config=config, port=port, live_confirmed=broker in LIVE_BROKERS)
 
 
 if __name__ == "__main__":

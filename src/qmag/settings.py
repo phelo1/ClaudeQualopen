@@ -97,6 +97,7 @@ ENV_FIELDS: tuple[EnvField, ...] = (
              help="Whole-market sweeps above this many symbols are served by Yahoo batches instead of one Unusual Whales call per symbol. 0 = always Unusual Whales."),
     EnvField("ALPACA_API_KEY", "API key ID", "alpaca", secret=True),
     EnvField("ALPACA_SECRET_KEY", "Secret key", "alpaca", secret=True),
+    EnvField("IBKR_ACCOUNT", "Trading account", "ibkr", placeholder="DU...", help="Required when the gateway exposes several accounts. All orders and risk calculations use only this account."),
     EnvField("IBKR_HOST", "Host", "ibkr", placeholder="127.0.0.1"),
     EnvField("IBKR_PORT", "Port", "ibkr", kind="number", placeholder="7497"),
     EnvField("IBKR_CLIENT_ID", "Client id (trading)", "ibkr", kind="number", placeholder="17"),
@@ -442,6 +443,7 @@ class SettingsStore:
 # Strategy config <-> HTML form
 # --------------------------------------------------------------------------- #
 SECTION_LABELS: dict[str, str] = {
+    "autonomy": "Autonomous research & improvement",
     "momentum": "Momentum filter",
     "breakout": "Breakout setup",
     "episodic_pivot": "Episodic pivot setup",
@@ -477,6 +479,24 @@ SECTION_SUMMARY: dict[str, str] = {
 
 # Plain-language help for the parameters operators touch most.
 FIELD_HELP: dict[str, str] = {
+    "autonomy.enabled": 'Run scheduled candidate research and prospective paper comparisons automatically. Does not enable live brokerage access.',
+    "autonomy.auto_promote": 'Automatically promote a candidate after prospective evidence passes the published gates; automatically roll back on deterioration.',
+    "autonomy.research_weekday": 'Weekday for background candidate discovery.',
+    "autonomy.research_time": 'New York time for weekly background candidate discovery.',
+    "autonomy.min_history_days": 'Minimum completed trading sessions for historical candidate research, including warm-up.',
+    "autonomy.min_forward_days": 'Minimum newly observed trading sessions before promotion. Never reuse the discovery period.',
+    "autonomy.min_forward_trades": 'Minimum closed candidate paper trades before prospective promotion.',
+    "autonomy.max_trial_days": 'Expire an inconclusive trial after this number of calendar days.',
+    "autonomy.max_candidates": 'Maximum one-step candidates tried in a research batch; all trials are recorded.',
+    "autonomy.minimum_return_lift": 'Minimum paired prospective portfolio return improvement over the frozen baseline.',
+    "autonomy.max_drawdown": 'Maximum forward candidate drawdown allowed for promotion, expressed as a fraction.',
+    "autonomy.rollback_drawdown": 'Roll back a promoted candidate when its forward portfolio drawdown exceeds this fraction.',
+    "autonomy.canary_risk_fraction": 'Fraction of the operator risk budget used for a newly promoted live candidate. Always at most one.',
+    "autonomy.canary_trades": 'Minimum broker-verified closed canary trades before returning to the operator risk budget.',
+    "autonomy.train_outcome_model": 'Fit an interpretable model from entry features and outcomes; validate chronologically and forward-test before using its weights.',
+    "autonomy.min_model_records": 'Minimum outcome records for fitting. Shadow samples have lower training weight and cannot be validation outcomes.',
+    "autonomy.retention_days": 'Retain generated chart/report artifacts for at least this many days. Never prune execution or trade records.',
+
     "risk.starting_equity": "Only used by the built-in paper ledger when it is created.",
     "risk.risk_per_trade_pct": "Fraction of equity lost if the initial stop is hit. 0.005 = 0.5 %.",
     "risk.max_position_pct": "Cap on one position as a fraction of equity.",
@@ -946,6 +966,19 @@ def validate_config(cfg: StrategyConfig) -> None:
             raise ValueError(f"{path} must be finite")
     finite_tree(cfg.to_dict())
     problems = []
+    a = cfg.autonomy
+    if not 0 < a.canary_risk_fraction <= 1:
+        problems.append("autonomy.canary_risk_fraction must be > 0 and <= 1")
+    if a.min_forward_days < 20 or a.min_forward_trades < 30 or a.min_model_records < 80:
+        problems.append("autonomy evidence minimums are 20 sessions, 30 prospective trades and 80 model records")
+    if not 1 <= a.max_candidates <= 20 or a.min_history_days < 250:
+        problems.append("autonomy needs 250+ history days and 1..20 candidates")
+    if not 0 < a.rollback_drawdown <= a.max_drawdown <= 0.3 or a.minimum_return_lift < 0:
+        problems.append("autonomy drawdowns must satisfy 0 < rollback <= maximum <= 30%; lift must be nonnegative")
+    if a.canary_trades < 20 or a.max_trial_days < 30 or a.retention_days < 7:
+        problems.append("autonomy needs 20+ canary trades, 30+ trial days and 7+ retention days")
+    if a.research_weekday not in CHOICES["insider_scan.weekday"] or not _valid_hhmm(a.research_time):
+        problems.append("autonomy research schedule must specify a weekday and HH:MM time")
     if not 0 < r.risk_per_trade_pct <= 0.1:
         problems.append("risk.risk_per_trade_pct must be between 0 and 0.1 (10 %)")
     if not 0 < r.max_position_pct <= 1:

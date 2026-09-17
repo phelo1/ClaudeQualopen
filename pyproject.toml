@@ -1,6 +1,6 @@
 [project]
 name = "qmag"
-version = "0.2.0"
+version = "0.3.0"
 description = "Research, backtest, optimise and paper-trade Qullamaggie-style momentum setups (breakouts and episodic pivots)."
 readme = "README.md"
 requires-python = ">=3.11"

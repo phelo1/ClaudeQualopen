@@ -23,7 +23,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"                 # add ,alpaca / ,ibkr / ,mt5 / ,finbert as needed
 qmag universe build                     # once; the Sunday job rebuilds it
 qmag dashboard --state-dir paper_state --port 8765
-qmag daemon --state-dir paper_state     # separate process; paper broker by default
+qmag autopilot --state-dir paper_state  # scheduler + dashboard supervisor; paper by default
 ```
 
 API keys go in either the environment or the dashboard's settings page, which
@@ -112,3 +112,8 @@ trader.
   orders, respect `--yes-live`.
 - Scratch files go under `/tmp`, never in the repo. Commit one logical change
   at a time.
+
+
+## Autonomous controller
+
+Read [AUTOPILOT.md](docs/AUTOPILOT.md) before maintaining a running desk. Prefer structured status and scoped operations. Preserve order intents, execution IDs and fee provenance. The trained outcome model is supervised; do not describe it as RL. Changes to learner actions require prospective baseline/challenger testing. Risk limits, account identity, credentials and halt state are outside the learner's search space.

@@ -86,6 +86,7 @@ class _Tick:
 
 @dataclass
 class _Acct:
+    currency: str = "USD"
     equity: float = 100_000.0
     margin_free: float = 80_000.0
     trade_mode: int = 0  # demo
@@ -232,21 +233,15 @@ def test_mt5_broker_bracket_market_and_exits(fake_mt5):
     assert filled.status == "filled" and filled.fill_price == 50.10
     assert b.positions()["TSLA"].qty == 90
 
-    # The trader's exit plan: OCO for the partial + stop for the rest -> SL on the position + SELL_LIMIT.
-    pos = ManagedPosition(symbol="TSLA", setup="ep", entry_date="2025-01-02", entry_price=50.1, shares=90, initial_stop=47.0, stop=47.0, pivot=50.0, remaining=90, target=56.3, partial_qty=30)
-    desired = _desired_exits(pos)
-    for d in desired:
-        if d.kind == "oco":
-            b.oco_sell("TSLA", d.qty, d.limit, d.trigger, tag="target:TSLA")
-        else:
-            b.stop_sell("TSLA", d.qty, d.trigger, tag="protective:TSLA")
-    existing = [x for x in b.open_orders() if x.side == "sell"]
-    assert orders_equivalent(existing, desired), existing
+    # MT5 protection stays attached to the position. A synthetic SELL_LIMIT
+    # could open a short after the stop closes the long, so it is not used.
+    assert b.native_oco is False
+    with pytest.raises(RuntimeError, match="no synthetic sell-limit OCO"):
+        b.oco_sell("TSLA", 30, 56.3, 47.0)
+    b.stop_sell("TSLA", 90, 47.0, tag="protective:TSLA")
     assert fake_mt5.pos[0].sl == 47.0
-    assert sum(1 for r in fake_mt5.sent if r["action"] == FakeMT5.TRADE_ACTION_SLTP) == 1  # second call was a no-op
-
-    # Cancelling leaves the protective SL on the position but removes the pending limit.
-    assert b.cancel_orders("TSLA") == 1
+    assert not fake_mt5.pend
+    assert b.cancel_orders("TSLA") == 0
     left = b.open_orders()
     assert len(left) == 1 and left[0].kind == "stop" and left[0].qty == 90 and left[0].trigger == 47.0
 

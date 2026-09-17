@@ -363,6 +363,38 @@ def create_app(session: TradingSession) -> FastAPI:
     def index() -> str:
         return env.get_template("index.html").render(**snapshot())
 
+    @app.get("/operations", response_class=HTMLResponse)
+    def operations_page() -> str:
+        return env.get_template("operations.html").render(settings=settings())
+
+    @app.get("/api/operations")
+    def operations_status() -> JSONResponse:
+        from .operations import status
+        return JSONResponse(status(session.state_dir))
+
+    @app.post("/api/maintenance")
+    def maintenance() -> JSONResponse:
+        from .operations import housekeeping
+        return JSONResponse(housekeeping(session.state_dir, session.cfg.autonomy.retention_days))
+
+    @app.get("/api/autonomy")
+    def autonomy_status() -> JSONResponse:
+        from .autonomy import read
+        return JSONResponse(read(session.state_dir))
+
+    @app.post("/api/autonomy/research")
+    def autonomy_research() -> JSONResponse:
+        return JSONResponse(session.start_research())
+
+    @app.get("/monitor", response_class=HTMLResponse)
+    def monitor_page() -> str:
+        return env.get_template("monitor.html").render(settings=settings())
+
+    @app.get("/api/monitor")
+    def monitored_charts() -> JSONResponse:
+        from .monitor import records
+        return JSONResponse({"records": records(session.state_dir, session.state())})
+
     @app.get("/journal", response_class=HTMLResponse)
     def journal_page() -> str:
         snap = snapshot()
@@ -386,6 +418,7 @@ def create_app(session: TradingSession) -> FastAPI:
             conn=session.connections(), config=session.cfg.to_dict(), shadows=shadows[:60], learned=dict(getattr(session, "learned_overrides", {}) or {}),
             knobs=[{"key": k.key, "label": k.label, "lo": k.lo, "hi": k.hi, "step": k.step, "kind": k.kind, "current": _knob_value(session.cfg, k.key), "help": FIELD_HELP.get(k.key, "")} for k in _knobs()],
             closed_total=len(state.closed),
+            autonomy=__import__("qmag.autonomy", fromlist=["read"]).read(session.state_dir), controls=session.cfg.autonomy,
         )
 
     @app.get("/api/learning")

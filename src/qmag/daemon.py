@@ -55,11 +55,13 @@ from .market_calendar import (  # noqa: F401 - re-exported for callers that impo
     parse_hhmm,
 )
 from .session import TradingSession
+from .persistence import atomic_json
+from .redact import describe_error
 
 log = logging.getLogger(__name__)
 
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
-TASK_NAMES = ("premarket", "post_open", "focused", "movers", "intraday", "after_close", "insider_scan", "learn", "universe")
+TASK_NAMES = ("premarket", "post_open", "focused", "movers", "intraday", "after_close", "insider_scan", "learn", "universe", "research", "reconcile", "housekeeping")
 
 
 # --------------------------------------------------------------------------- #
@@ -227,11 +229,18 @@ class Daemon:
             Task("after_close", self._t_after_close, lambda: s.cycle(max_age_hours=0.0, label="after_close")),
             Task("insider_scan", self._t_insider, lambda: s.insider_scan()),
             Task("learn", self._t_learn, lambda: s.learn()),
+            Task("research", self._t_research, lambda: s.start_research()),
+            Task("reconcile", lambda d: [time(h, m) for h in range(24) for m in range(0, 60, 5)], s.reconcile_orders),
+            Task("housekeeping", lambda d: [time(4, 0)], self._housekeeping),
         ]
         # The whole-market universe is always built from Yahoo batches (Unusual
         # Whales has no bulk bars endpoint); see UnusualWhalesProvider.
         if self.rebuild_universe and s.s.data in ("yfinance", "unusual_whales") and not s.s.symbols:
             self.tasks.append(Task("universe", _weekly_universe, self._rebuild_universe))
+
+    def _housekeeping(self):
+        from .operations import housekeeping
+        return housekeeping(self.session.state_dir, self.session.cfg.autonomy.retention_days)
 
     # -- schedule from the live config -------------------------------------
     @property
@@ -276,6 +285,13 @@ class Daemon:
             return []
         weekday = WEEKDAYS.index(ins.weekday) if ins.weekday in WEEKDAYS else 5
         return [_safe_time(ins.run_time, time(10, 0))] if d.weekday() == weekday else []
+
+    def _t_research(self, d: date) -> list[time]:
+        controls = self.session.cfg.autonomy
+        if not controls.enabled:
+            return []
+        weekday = WEEKDAYS.index(controls.research_weekday) if controls.research_weekday in WEEKDAYS else 6
+        return [_safe_time(controls.research_time, time(13, 0))] if d.weekday() == weekday else []
 
     def _t_learn(self, d: date) -> list[time]:
         ln = self.session.cfg.learning
@@ -329,7 +345,7 @@ class Daemon:
                 for t in self.tasks
             ],
         }
-        self.status_path.write_text(json.dumps(payload, indent=2))
+        atomic_json(self.status_path, payload)
 
     def run_task(self, name: str) -> object:
         task = next((t for t in self.tasks if t.name == name), None)
@@ -343,7 +359,7 @@ class Daemon:
             log.info("task %s finished", name)
             return result
         except Exception as exc:
-            task.last_error = f"{type(exc).__name__}: {exc}"
+            task.last_error = describe_error(exc)
             log.error("task %s failed: %s\n%s", name, exc, traceback.format_exc())
             alerts = getattr(self.session, "alerts", None)
             if alerts is not None:
@@ -377,16 +393,42 @@ class Daemon:
             _time.sleep(min(left, 1.0))
 
     def _loop(self, heartbeat_seconds: int) -> None:
+        # Keep due times across long jobs. Simultaneous tasks must all run;
+        # coalesce missed repeated ticks rather than replaying stale orders.
+        next_due = {t.name: t.next_after(datetime.now(NY)) for t in self.tasks}
+        previous = {}
+        if self.status_path.exists():
+            try:
+                previous = {t["name"]: t for t in json.loads(self.status_path.read_text()).get("tasks", [])}
+            except (ValueError, OSError):
+                pass
+        for name in ("reconcile", "housekeeping", "research"):
+            prior = previous.get(name, {}).get("last_run")
+            age = (datetime.now(NY)-datetime.fromisoformat(prior)).total_seconds() if prior else float("inf")
+            if name in next_due and age > (7*86400 if name == "research" else 86400 if name == "housekeeping" else 300):
+                next_due[name] = datetime.now(NY)
+        retry_counts = {}
         while not self._stop:
             now = datetime.now(NY)
-            self.session.reload_settings()  # a schedule saved on the settings page applies to the next tick
-            upcoming = [(task.next_after(now), task) for task in self.tasks]
-            due_at, task = min(upcoming, key=lambda x: x[0])
-            log.info("next: %s at %s", task.name, due_at.strftime("%a %Y-%m-%d %H:%M %Z"))
-            while not self._stop and datetime.now(NY) < due_at:
-                self.write_status(datetime.now(NY), (due_at, task.name))
-                remaining = (due_at - datetime.now(NY)).total_seconds()
-                self._sleep(max(0.5, min(remaining, heartbeat_seconds)))
-            if not self._stop:
+            if self.session.reload_settings():
+                for task in self.tasks:
+                    next_due[task.name] = min(next_due[task.name], task.next_after(now))
+            ready = sorted([t for t in self.tasks if next_due[t.name] <= now], key=lambda t: (t.name != "reconcile", next_due[t.name]))
+            for task in ready:
+                if self._stop:
+                    break
                 self.run_task(task.name)
+                finished = datetime.now(NY)
+                next_due[task.name] = task.next_after(finished)
+                if task.last_error:
+                    attempt = retry_counts.get(task.name, 0) + 1
+                    retry_counts[task.name] = attempt
+                    # Trading retries first reconcile persisted intents inside
+                    # run_cycle. No unconditional order resubmission occurs.
+                    next_due[task.name] = min(next_due[task.name], finished + timedelta(seconds=min(900, 30 * 2**min(attempt, 5))))
+                else:
+                    retry_counts[task.name] = 0
+            upcoming = min((when, name) for name, when in next_due.items())
+            self.write_status(datetime.now(NY), upcoming)
+            self._sleep(max(.5, min(heartbeat_seconds, (upcoming[0]-datetime.now(NY)).total_seconds())))
         log.info("daemon stopped")

@@ -253,7 +253,7 @@ def test_session_layers_learned_overrides_and_reset_restores_settings(tmp_path, 
     assert sess.cfg.breakout.min_breakout_volume_ratio == pytest.approx(1.2)
     # Existing bounded overrides are respected only with explicit opt-in.
     (sess.state_dir / OVERRIDES_FILE).write_text(yaml.safe_dump({"overrides": {"breakout.min_breakout_volume_ratio": 1.3}}))
-    enabled = _session(tmp_path, csv_universe, **{"learning.auto_apply": True})
+    enabled = _session(tmp_path, csv_universe, **{"learning.auto_apply": True, "autonomy.enabled": False})
     assert enabled.cfg.breakout.min_breakout_volume_ratio == pytest.approx(1.3)
     pinned = _session(tmp_path, csv_universe, **{"learning.auto_apply": True, "breakout.min_breakout_volume_ratio": 1.5})
     assert pinned.cfg.breakout.min_breakout_volume_ratio == pytest.approx(1.5)

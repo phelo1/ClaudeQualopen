@@ -128,11 +128,15 @@ def test_full_scan_arms_and_focused_pass_keeps_unchanged_buy_stops(tmp_path, csv
     later = sess.state()
     # A buy-stop filled on a wick that closed back below the pivot is cut the same day (failed breakout);
     # everything else that filled is managed and no longer armed.
-    cut = {c["symbol"] for c in later.closed if c["exit_reason"] == "failed_breakout"}
+    cut = {c["symbol"] for c in later.closed if c["exit_reason"] in ("failed_breakout", "broker_execution")}
     assert all(sym in later.managed or sym in cut for sym in filled)
     assert not ((filled - cut) & set(later.arming))
     for c in later.closed:
-        assert c["features"]["entry_mode"] == "buy_stop" and "wick_fill" in c["post_mortem"]["tags"]
+        assert c["features"]["entry_mode"] == "buy_stop"
+        if c["exit_reason"] == "failed_breakout":
+            assert "wick_fill" in c["post_mortem"]["tags"]
+        else:
+            assert c["evidence"] == "paper_fill" and c["exit_order_ids"]
 
 
 def test_focused_pass_with_nothing_armed_requests_no_data(tmp_path, csv_universe):
@@ -161,13 +165,14 @@ def test_daemon_schedule_tiered_weekday_and_saturday(tmp_path, csv_universe):
     sess = _session(tmp_path, csv_universe)
     d = Daemon(sess, rebuild_universe=False)
     thursday = {name for _, name in d.schedule(datetime(2026, 9, 10, 0, 1, tzinfo=NY), days=1)}
-    assert thursday == {"premarket", "post_open", "focused", "movers", "after_close"}
+    assert thursday == {"premarket", "post_open", "focused", "movers", "after_close", "reconcile", "housekeeping"}
     times = [(when, name) for when, name in d.schedule(datetime(2026, 9, 10, 0, 1, tzinfo=NY), days=1)]
     focused = [w for w, n in times if n == "focused"]
     assert focused[0].strftime("%H:%M") == "09:35" and focused[-1].strftime("%H:%M") == "15:55"
     assert all((b - a).total_seconds() == 300 for a, b in zip(focused, focused[1:]))
     saturday = [(w.strftime("%a %H:%M"), n) for w, n in d.schedule(datetime(2026, 9, 12, 0, 1, tzinfo=NY), days=1)]
-    assert saturday == [("Sat 10:00", "insider_scan"), ("Sat 11:00", "learn")]
+    assert [(w,n) for w,n in saturday if n not in ("reconcile", "housekeeping")] == [("Sat 10:00", "insider_scan"), ("Sat 11:00", "learn")]
+    assert ("Sat 04:00", "housekeeping") in saturday
     assert d._t_insider(datetime(2026, 9, 13).date()) == []  # Sunday: nothing
     status = json.loads(d.status_path.read_text()) if d.status_path.exists() else None
     d.write_status(datetime.now(NY), None)
@@ -179,7 +184,7 @@ def test_daemon_schedule_legacy_when_tiered_off(tmp_path, csv_universe):
     sess = _session(tmp_path, csv_universe, **{"schedule.tiered": False, "insider_scan.enabled": False, "learning.enabled": False})
     d = Daemon(sess, rebuild_universe=False)
     names = {name for _, name in d.schedule(datetime(2026, 9, 10, 0, 1, tzinfo=NY), days=3)}
-    assert names == {"post_open", "intraday", "after_close"}
+    assert names == {"post_open", "intraday", "after_close", "reconcile", "housekeeping"}
 
 
 # --------------------------------------------------------------------------- #

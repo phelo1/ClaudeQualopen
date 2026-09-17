@@ -49,6 +49,7 @@ import json
 from .persistence import atomic_text, atomic_json
 import logging
 import time
+import uuid
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
@@ -171,6 +172,13 @@ class ManagedPosition:
     mae_r: float = 0.0
     evidence: str = "estimated"  # legacy records never become verified by migration
     pending_exit: dict | None = None
+    entry_order_id: str = ""
+    entry_complete: bool = True
+    exit_order_ids: list[str] = field(default_factory=list)
+    fees: float = 0.0
+    fees_known: bool = False
+    protection_intents: list[dict] = field(default_factory=list)
+    liquidation_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.remaining < 0:
@@ -195,7 +203,7 @@ class ManagedPosition:
 
         self.book_sale(last_qty, last_price)
         cost = self.shares * self.entry_price
-        pnl = self.realised - cost
+        pnl = self.realised - cost - self.fees
         rec = asdict(self)
         try:
             hold_days = max(len(pd.bdate_range(pd.Timestamp(self.entry_date), pd.Timestamp(asof))) - 1, 0)
@@ -223,6 +231,7 @@ class PendingPlan:
     stop: float
     qty: int
     order_id: str
+    client_tag: str = ""
     entry_kind: str = "buy_stop"  # buy_stop | market
     target: float | None = None
     partial_qty: int = 0
@@ -236,6 +245,9 @@ class TraderState:
     managed: dict[str, dict] = field(default_factory=dict)
     pending: dict[str, dict] = field(default_factory=dict)
     closed: list[dict] = field(default_factory=list)
+    policy: dict = field(default_factory=dict)
+    executions: dict[str, dict] = field(default_factory=dict)
+    reconciliation: dict = field(default_factory=dict)
     last_run: str | None = None
     # The arming list: symbol -> {setup, pivot, entry, stop, score, distance_pct, source, armed_on, ...}.
     # Rebuilt by every full scan, extended by pre-market / movers screens and focused passes.
@@ -376,8 +388,14 @@ def portfolio_gate(
     loss circuit-breaker and theme concentration. Empty list = allowed."""
     r = cfg.risk
     reasons: list[str] = []
+    if state.reconciliation.get("issues"):
+        reasons.append("broker reconciliation incomplete; no additional risk")
+    if any(not rec.get("entry_complete", True) for rec in state.managed.values()):
+        reasons.append("partial entry remains working; no additional risk")
     if any(rec.get("pending_exit") for rec in state.managed.values()):
         reasons.append("exit execution unresolved; reconcile before opening more risk")
+    if any(rec.get("protection_intents") for rec in state.managed.values()):
+        reasons.append("protective order acknowledgement unresolved")
     if r.max_portfolio_heat_pct > 0 and equity > 0:
         added = float(plan.risk_dollars) / equity
         if heat_pct + added > r.max_portfolio_heat_pct + 1e-9:
@@ -397,19 +415,52 @@ def submit_exit(broker: Broker, pos: ManagedPosition, qty: int, reason: str, aso
     if pos.pending_exit:
         report.actions.append(f"WAIT {pos.symbol}: exit {pos.pending_exit['order_id']} awaits broker reconciliation")
         return False
-    broker.cancel_orders(pos.symbol)
-    order = broker.market_sell(pos.symbol, qty, tag=f"{reason}:{pos.symbol}")
-    pos.pending_exit = {"order_id": order.id, "qty": qty, "reason": reason, "submitted_at": asof}
+    from .executions import cancel_one, capable
+    if capable(broker):
+        for existing in broker.open_orders():
+            if existing.symbol == pos.symbol and existing.side == "sell":
+                known = set(pos.exit_order_ids)
+                owned = bool(set(existing.id.split(",")) & known) or existing.tag.startswith(("protective:", "target:", "qmag-"))
+                if owned and not cancel_one(broker, existing.id):
+                    report.actions.append(f"WAIT {pos.symbol}: protective cancellation is unconfirmed")
+                    return False
+    else:
+        broker.cancel_orders(pos.symbol)
+    if capable(broker) and pos.entry_order_id:
+        held = broker.positions().get(pos.symbol)
+        if (held.qty if held else 0) != pos.remaining:
+            state.reconciliation.setdefault("issues", []).append(f"{pos.symbol}: fills changed while cancelling exits; reconcile before submitting")
+            state.checkpoint()
+            return False
+    tag = "qmag-" + uuid.uuid4().hex[:24]
+    if qty >= pos.remaining:
+        pos.liquidation_reason = reason
+    pos.pending_exit = {"order_id": "", "client_tag": tag, "qty": qty, "reason": reason, "submitted_at": asof}
+    state.managed[pos.symbol] = asdict(pos)
+    state.checkpoint()
+    order = broker.market_sell(pos.symbol, qty, tag=tag)
+    pos.exit_order_ids.extend(order.id.split(","))
+    pos.pending_exit = {"order_id": order.id, "client_tag": tag, "qty": qty, "reason": reason, "submitted_at": asof}
     state.managed[pos.symbol] = asdict(pos)
     state.checkpoint()
     if order.status != "filled" or order.fill_price is None or not np.isfinite(order.fill_price):
         state.managed[pos.symbol] = asdict(pos)
         report.actions.append(f"WAIT {pos.symbol}: {reason} submitted, execution not confirmed")
         return False
+    qty = min(qty, int(order.filled_qty if order.filled_qty is not None else order.qty))
     pos.pending_exit = None
+    from .executions import BrokerView, poll
+    if capable(broker):
+        try:
+            snap = poll(BrokerView(broker), state, order.id)
+            if snap and snap.get("fees") is not None:
+                pos.fees += snap["fees"]
+        except Exception:
+            pos.fees_known = False
     # Exact paper executions remain paper evidence, never live verification.
     if pos.evidence != "estimated":
-        pos.evidence = "paper_fill" if getattr(broker, "name", "") == "paper" else "broker_verified"
+        from .executions import evidence_for
+        pos.evidence = evidence_for(broker)
     if qty >= pos.remaining:
         state.closed.append(pos.close_record(asof, reason, qty, float(order.fill_price)))
         state.managed.pop(pos.symbol, None)
@@ -440,30 +491,98 @@ def _desired_exits(pos: ManagedPosition) -> list[Order]:
     return [Order(id="", symbol=pos.symbol, side="sell", qty=pos.remaining, kind="stop", trigger=pos.stop)]
 
 
-def ensure_exit_orders(broker: Broker, pos: ManagedPosition, report: CycleReport) -> None:
-    desired = _desired_exits(pos)
+def ensure_exit_orders(broker: Broker, pos: ManagedPosition, report: CycleReport, state: TraderState | None = None) -> None:
+    from .executions import cancel_one, capable
+    desired = _desired_exits(pos) if getattr(broker, "native_oco", True) else [Order("", pos.symbol, "sell", pos.remaining, "stop", trigger=pos.stop)]
     existing = [o for o in broker.open_orders() if o.symbol == pos.symbol and o.side == "sell"]
-    if orders_equivalent(existing, desired):
+    if pos.protection_intents:
+        from .executions import BrokerView, poll
+        for intent in list(pos.protection_intents):
+            matches = [o for o in existing if o.tag == intent["tag"]]
+            ids = [oid for o in matches for oid in o.id.split(",")]
+            if not ids and state is not None and capable(broker):
+                snap = poll(BrokerView(broker), state, "", intent["tag"])
+                if snap:
+                    ids = [snap["id"], *snap.get("child_ids", [])]
+            if ids:
+                pos.exit_order_ids.extend(ids)
+                pos.protection_intents.remove(intent)
+        if pos.protection_intents and not (getattr(broker, "native_oco", True) is False and orders_equivalent(existing, desired)):
+            report.actions.append(f"WAIT {pos.symbol}: protection acknowledgement unknown; retaining intent")
+            return
+        pos.protection_intents = []
+        if state is not None:
+            state.managed[pos.symbol] = asdict(pos)
+            state.checkpoint()
+    owned = lambda o: bool(set(o.id.split(",")) & set(pos.exit_order_ids)) or o.tag.startswith(("protective:", "target:", "qmag-"))
+    if capable(broker) and any(not owned(o) for o in existing):
+        report.actions.append(f"WAIT {pos.symbol}: an unowned sell order needs reconciliation")
+        if state is not None:
+            state.reconciliation.setdefault("issues", []).append(f"{pos.symbol}: unowned sell order")
         return
-    broker.cancel_orders(pos.symbol)
+    if orders_equivalent(existing, desired):
+        pos.exit_order_ids = list(dict.fromkeys(pos.exit_order_ids + [oid for o in existing for oid in o.id.split(",")]))
+        if state is not None:
+            state.managed[pos.symbol] = asdict(pos)
+            state.checkpoint()
+        return
+    if not pos.entry_complete:
+        # Stop the remaining entry before replacing protection for a partial fill.
+        if not cancel_one(broker, pos.entry_order_id):
+            report.actions.append(f"WAIT {pos.symbol}: partial entry cancellation pending")
+            return
+        pos.entry_complete = True
+    for old in existing:
+        owned = bool(set(old.id.split(",")) & set(pos.exit_order_ids)) or old.tag.startswith(("protective:", "target:", "qmag-"))
+        if capable(broker) and (not owned or not cancel_one(broker, old.id)):
+            report.actions.append(f"WAIT {pos.symbol}: protection replacement awaits owned-order cancellation")
+            return
+    if not capable(broker):
+        broker.cancel_orders(pos.symbol)
+    if capable(broker) and pos.entry_order_id:
+        held = broker.positions().get(pos.symbol)
+        if (held.qty if held else 0) != pos.remaining:
+            report.actions.append(f"WAIT {pos.symbol}: fills changed during protection replacement")
+            if state is not None:
+                state.reconciliation.setdefault("issues", []).append(f"{pos.symbol}: protection resize needs fresh fills")
+                state.checkpoint()
+            return
     for o in desired:
+        tag = "qmag-" + uuid.uuid4().hex[:24]
+        pos.protection_intents.append({"tag": tag, "kind": o.kind, "qty": o.qty, "stop": o.trigger, "limit": o.limit})
+        if state is not None:
+            state.managed[pos.symbol] = asdict(pos)
+            state.checkpoint()
         if o.kind == "oco":
-            broker.oco_sell(pos.symbol, o.qty, o.limit, o.trigger, tag=f"target:{pos.symbol}")
-            report.actions.append(f"EXITS {pos.symbol}: OCO {o.qty} sh target {o.limit:.2f} / stop {o.trigger:.2f}")
+            result = broker.oco_sell(pos.symbol, o.qty, o.limit, o.trigger, tag=tag)
         else:
-            broker.stop_sell(pos.symbol, o.qty, o.trigger, tag=f"protective:{pos.symbol}")
-            report.actions.append(f"EXITS {pos.symbol}: stop {o.qty} sh @ {o.trigger:.2f}")
+            result = broker.stop_sell(pos.symbol, o.qty, o.trigger, tag=tag)
+        pos.exit_order_ids.extend(result.id.split(","))
+        pos.protection_intents = [p for p in pos.protection_intents if p["tag"] != tag]
+        if state is not None:
+            state.managed[pos.symbol] = asdict(pos)
+            state.checkpoint()
+        report.actions.append(f"EXITS {pos.symbol}: {o.kind} {o.qty} sh, stop {o.trigger:.2f}")
 
 
 def _await_fill(broker: Broker, order: Order, symbol: str, timeout: float = 10.0) -> tuple[int, float] | None:
     """Wait briefly for a market order to show up as a position. Paper fills instantly."""
     if order.status == "filled" and order.fill_price is not None:
-        return order.qty, float(order.fill_price)
+        return int(order.filled_qty if order.filled_qty is not None else order.qty), float(order.fill_price)
     if hasattr(broker, "mark"):  # paper broker: no price known yet, nothing to wait for
         return None
     wait = getattr(broker, "wait", time.sleep)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        from .executions import capable, BrokerView, TERMINAL
+        if capable(broker):
+            snap = BrokerView(broker).order(order.id, order.tag)
+            if snap and snap.filled:
+                return snap.filled, snap.average
+            if snap and snap.status in TERMINAL:
+                return None
+            wait(1.0)
+            continue
         held = broker.positions().get(symbol)
         if held is not None and held.qty > 0:
             return held.qty, held.avg_price
@@ -488,6 +607,8 @@ def _adopt(state: TraderState, plan: PendingPlan, qty: int, avg_price: float, as
         plan=plan.plan,
         features=plan.features,
         evidence=evidence,
+        entry_order_id=plan.order_id,
+        entry_complete=qty >= plan.qty,
     )
     state.managed[plan.symbol] = asdict(pos)
     state.pending.pop(plan.symbol, None)
@@ -750,16 +871,22 @@ def run_cycle(
     resting_allowed = mode == "resting" or (mode == "hybrid" and live.in_session and live.at_or_after(en.resting_from))
     gated = mode in ("confirmed", "hybrid")
 
+    from .executions import cancel_pending
+
     # 0. A halted desk takes no new entries - including buy-stops that were
     # resting before the halt: cancel them before any fill can be booked.
     if halted:
         for sym in list(state.pending):
-            broker.cancel_orders(sym)
+            if not cancel_pending(broker, state, sym):
+                report.actions.append(f"WAIT {sym}: entry cancellation/reconciliation pending")
+                continue
             state.pending.pop(sym)
             report.actions.append(f"CANCEL resting buy-stop {sym} (halted)")
     if state.day_equity and state.day_equity.get("date") == report.asof and state.day_equity.get("loss_latched"):
         for sym in list(state.pending):
-            broker.cancel_orders(sym)
+            if not cancel_pending(broker, state, sym):
+                report.actions.append(f"WAIT {sym}: entry cancellation/reconciliation pending")
+                continue
             state.pending.pop(sym)
             report.actions.append(f"CANCEL {sym}: daily loss stop is latched")
     # Let the paper broker fill resting orders against the latest bars.
@@ -768,10 +895,18 @@ def run_cycle(
         for o in broker.mark(bars, when=asof):  # type: ignore[attr-defined]
             report.actions.append(f"FILL {o.side} {o.qty} {o.symbol} @ {o.fill_price:.2f} ({o.kind})")
 
+    from .executions import capable, reconcile
+    exact = reconcile(broker, state, cfg, report.asof, report.actions) if capable(broker) else set()
     held = broker.positions()
+    for sym in exact:
+        managed = state.managed.get(sym)
+        if managed and int(managed["remaining"]) != int(held[sym].qty if sym in held else 0):
+            state.reconciliation.setdefault("issues", []).append(f"{sym}: broker holdings differ from execution ledger")
 
     # 1. Reconcile our book with the broker's.
     for sym in list(state.managed):
+        if sym in exact:
+            continue
         if sym not in held:
             pos = ManagedPosition(**state.managed.pop(sym))
             bar = data[sym].iloc[-1] if sym in data else None
@@ -790,6 +925,8 @@ def run_cycle(
             broker.cancel_orders(sym)
             report.actions.append(f"CLOSED {sym} ({reason}) ~{price:.2f}, {rec['r_multiple']:+.2f}R")
     for sym, bp in held.items():
+        if sym in exact:
+            continue
         if sym in state.managed:
             pos = ManagedPosition(**state.managed[sym])
             if bp.qty < pos.remaining:
@@ -825,8 +962,12 @@ def run_cycle(
     # Unconfirmed market buys never survive a cycle: if the broker does not hold
     # the stock by now the order is gone and the plan must be re-made.
     for sym, rec in list(state.pending.items()):
+        if sym in exact:
+            continue
         if rec.get("entry_kind") != "buy_stop":
-            broker.cancel_orders(sym)
+            if not cancel_pending(broker, state, sym):
+                report.actions.append(f"WAIT {sym}: entry cancellation/reconciliation pending")
+                continue
             state.pending.pop(sym)
             report.actions.append(f"CANCEL unconfirmed entry {sym}")
     # Resting buy-stops are reconciled against this pass's plans further down:
@@ -837,7 +978,8 @@ def run_cycle(
         # confirmed mode never rests orders; hybrid mode rests them only intraday.
         why = "confirmed mode: entries are bought at market once the breakout is confirmed" if mode == "confirmed" else "hybrid mode: no resting orders outside the session window"
         for sym in list(prior_pending):
-            broker.cancel_orders(sym)
+            if not cancel_pending(broker, state, sym):
+                continue
             state.pending.pop(sym, None)
             prior_pending.pop(sym)
             report.actions.append(f"CANCEL resting buy-stop {sym} ({why})")
@@ -849,12 +991,23 @@ def run_cycle(
         if df is None or sym not in held:
             continue
         pos = ManagedPosition(**rec)
+        if sym in exact and any(issue.startswith(sym + ":") for issue in state.reconciliation.get("issues", [])):
+            report.actions.append(f"WAIT {sym}: execution ledger and holdings must agree before further orders")
+            continue
         if pos.pending_exit:
             report.actions.append(f"WAIT {sym}: exit awaiting reconciliation; inspect broker orders")
+            continue
+        if pos.liquidation_reason:
+            submit_exit(broker, pos, pos.remaining, pos.liquidation_reason, report.asof, state, report)
             continue
         bars_held = int((df.index > pd.Timestamp(pos.entry_date)).sum())
         last = df.iloc[-1]
         remaining = pos.remaining
+        if not getattr(broker, "native_oco", True) and not pos.partial_done and pos.target and float(df.iloc[-1]["close"]) >= pos.target:
+            qty = partial_quantity(remaining, mgmt.partial_fraction)
+            if qty > 0:
+                submit_exit(broker, pos, qty, "partial_target", report.asof, state, report)
+                continue
         if df.index[-1] == asof:
             pos.track_excursion(last)
             state.managed[sym] = asdict(pos)
@@ -888,7 +1041,7 @@ def run_cycle(
                 pos.stop = max(pos.stop, pos.entry_price)
                 report.actions.append(f"STOP {sym} -> {pos.stop:.2f} (breakeven)")
             state.managed[sym] = asdict(pos)
-            ensure_exit_orders(broker, pos, report)
+            ensure_exit_orders(broker, pos, report, state)
             continue
 
         trail = last.get(trail_col, np.nan)
@@ -897,7 +1050,7 @@ def run_cycle(
             submit_exit(broker, pos, remaining, reason, report.asof, state, report)
             continue
 
-        ensure_exit_orders(broker, pos, report)
+        ensure_exit_orders(broker, pos, report, state)
 
     # 3. Regime (market sentiment): benchmark trend, breadth, volatility.
     if regime is not None:
@@ -917,6 +1070,9 @@ def run_cycle(
             report.actions.append(f"DATA {gap} -> treated as risk-off")
 
     acct = broker.account()
+    if acct.currency != "USD":
+        block_new_entries = "USD account conversion unavailable"
+        report.data_gaps.append(block_new_entries)
     report.equity = acct.equity
     held = broker.positions()
     exposure = sum(p.qty * (float(data[s]["close"].iloc[-1]) if s in data else p.avg_price) for s, p in held.items())
@@ -935,7 +1091,9 @@ def run_cycle(
 
     if (state.day_equity or {}).get("loss_latched"):
         for sym in list(state.pending):
-            broker.cancel_orders(sym)
+            if not cancel_pending(broker, state, sym):
+                report.actions.append(f"WAIT {sym}: entry cancellation/reconciliation pending")
+                continue
             state.pending.pop(sym)
             prior_pending.pop(sym, None)
     # 4. New ideas: detect, then run the full checklist and size each one.
@@ -991,7 +1149,8 @@ def run_cycle(
             continue
         if not full_scan and (sym in report.skipped_far or (sym in state.arming and sym not in scanned)):
             continue  # still armed: too far to re-plan, or no fresh bar to judge it on
-        broker.cancel_orders(sym)
+        if not cancel_pending(broker, state, sym):
+            continue
         state.pending.pop(sym, None)
         prior_pending.pop(sym)
         report.actions.append(f"CANCEL untriggered entry {sym}")
@@ -1002,6 +1161,8 @@ def run_cycle(
     report.recent_r = recent_r_multiples(state)
     risk_evidence = [float(r["r_multiple"]) for r in state.closed if r.get("evidence") == "broker_verified" and _num(r.get("r_multiple")) is not None]
     risk_mult = min(1.0, adaptive_risk_multiplier(risk_evidence, cfg))  # performance alone never increases the base risk budget
+    if state.policy.get("stage") == "canary":
+        risk_mult *= min(1.0, max(0.01, cfg.autonomy.canary_risk_fraction))
     report.risk_mult = risk_mult
     if risk_mult != 1.0:
         report.actions.append(f"RISK x{risk_mult:.2f}: last {len(report.recent_r[-cfg.adaptive.lookback_trades:])} trades averaged {np.mean(report.recent_r[-cfg.adaptive.lookback_trades:]):+.2f}R")
@@ -1088,21 +1249,40 @@ def run_cycle(
         triggered_plans = sorted((plan_for(sig, float(data[sig.symbol]["close"].iloc[-1]), True) for sig in triggered), key=lambda p: p.score, reverse=True)
         watch_plans = sorted((plan_for(sig, None, False) for sig in plan_watch), key=lambda p: p.score, reverse=True)
     sig_by_symbol = {s.symbol: s for s in triggered + plan_watch}
+    if state.policy.get("model"):
+        from .outcome_model import predict
+        for plan in triggered_plans + watch_plans:
+            sig = sig_by_symbol[plan.symbol]
+            features = entry_features(sig, plan, data[sig.symbol].iloc[-1], mode, "model", report.scan, live, report.regime_ok, report.regime_note, risk_mult)
+            expected = predict(state.policy["model"], features)
+            if expected is not None:
+                plan.score = float(plan.score) + expected
+                plan.checks["learned_expected_return"] = expected >= -0.25
+                plan.notes["predicted_r"] = round(expected, 3)
+        triggered_plans.sort(key=lambda p: p.score, reverse=True)
+        watch_plans.sort(key=lambda p: p.score, reverse=True)
 
-    def drop_prior(sym: str, why: str) -> None:
+
+    def drop_prior(sym: str, why: str) -> bool:
         """Cancel a resting buy-stop that this pass is replacing or abandoning; frees its slot."""
         nonlocal slots
-        if prior_pending.pop(sym, None) is not None:
-            broker.cancel_orders(sym)
+        if sym in prior_pending:
+            if not cancel_pending(broker, state, sym):
+                return False
+            prior_pending.pop(sym, None)
             state.pending.pop(sym, None)
             slots += 1
+            state.checkpoint()
             report.actions.append(f"CANCEL untriggered entry {sym} ({why})")
+        return True
 
     scan_label = label or ("nightly" if full_scan else "focused")
 
     def features_for(sig: Signal, plan: TradePlan, entry_mode: str) -> dict:
         source = str((state.arming.get(sig.symbol) or {}).get("source") or (screen_hits.get(sig.symbol) or {}).get("source") or scan_label)
-        return entry_features(sig, plan, data[sig.symbol].iloc[-1], entry_mode, source, report.scan, live, report.regime_ok, report.regime_note, risk_mult)
+        features = entry_features(sig, plan, data[sig.symbol].iloc[-1], entry_mode, source, report.scan, live, report.regime_ok, report.regime_note, risk_mult)
+        features["policy_version"] = state.policy.get("id", "baseline")
+        return features
 
     for plan in triggered_plans:
         sig = sig_by_symbol[plan.symbol]
@@ -1122,20 +1302,24 @@ def run_cycle(
                 record_shadow(state, cfg, "held", sig, plan, report.asof, holds, features_for(sig, plan, market_mode), immediate=True)
                 report.actions.append(f"HOLD {sig.symbol} ({sig.setup}): {'; '.join(holds)} - stays armed, re-checked next pass")
                 continue
-        if sig.symbol in prior_pending:
-            drop_prior(sig.symbol, "triggered now")
+        if sig.symbol in prior_pending and not drop_prior(sig.symbol, "triggered now"):
+            continue
         if slots <= 0:
             record_shadow(state, cfg, "no_slot", sig, plan, report.asof, ["portfolio full"], features_for(sig, plan, market_mode), immediate=True)
             report.actions.append(f"FULL {sig.symbol}: confirmed but no free slot ({cfg.risk.max_positions} max)")
             continue
         if risk_blocked(sig, plan, market_mode, immediate=True):
             continue
-        order = broker.market_buy(sig.symbol, plan.shares, tag=f"{sig.setup}:{sig.symbol}")
+        tag = "qmag-" + uuid.uuid4().hex[:24]
         pending = PendingPlan(
-            sig.symbol, sig.setup, report.asof, plan.entry, plan.stop, plan.shares, order.id,
+            sig.symbol, sig.setup, report.asof, plan.entry, plan.stop, plan.shares, "", client_tag=tag,
             entry_kind="market", target=plan.partial_target, partial_qty=plan.partial_qty, theme=plan.theme, plan=plan.to_dict(),
             features=features_for(sig, plan, market_mode),
         )
+        state.pending[sig.symbol] = asdict(pending)
+        state.checkpoint()
+        order = broker.market_buy(sig.symbol, plan.shares, tag=tag)
+        pending.order_id = order.id
         state.pending[sig.symbol] = asdict(pending)
         state.checkpoint()
         report.plans.append(plan)
@@ -1147,8 +1331,9 @@ def run_cycle(
             report.actions.append(f"WAIT {sig.symbol}: market buy not yet confirmed; will adopt and protect next cycle")
         else:
             qty, avg = filled
-            pos = _adopt(state, pending, qty, avg, report.asof, cfg, evidence="paper_fill" if report.broker == "paper" else "broker_verified")
-            ensure_exit_orders(broker, pos, report)
+            from .executions import evidence_for
+            pos = _adopt(state, pending, qty, avg, report.asof, cfg, evidence=evidence_for(broker))
+            ensure_exit_orders(broker, pos, report, state)
         exposure += plan.position_value
         cash -= plan.position_value
         slots -= 1
@@ -1189,8 +1374,8 @@ def run_cycle(
             cash -= plan.position_value
             report.actions.append(f"KEEP buy-stop {plan.summary()}")
             continue
-        if prior is not None:
-            drop_prior(sig.symbol, "plan changed")
+        if prior is not None and not drop_prior(sig.symbol, "plan changed"):
+            continue
         if slots <= 0:
             record_shadow(state, cfg, "no_slot", sig, plan, report.asof, ["portfolio full"], features_for(sig, plan, "buy_stop"), immediate=False)
             continue
@@ -1198,19 +1383,24 @@ def run_cycle(
             continue
         # Stop-limit: never chase a stock that gaps more than max_gap_pct over the pivot.
         limit = sig.pivot * (1 + cfg.breakout.max_gap_pct)
-        order = broker.buy_stop_bracket(sig.symbol, plan.shares, sig.entry, plan.stop, limit=limit, tag=f"breakout:{sig.symbol}")
-        state.pending[sig.symbol] = asdict(
-            PendingPlan(
-                sig.symbol, sig.setup, report.asof, sig.entry, plan.stop, plan.shares, order.id,
-                entry_kind="buy_stop", target=plan.partial_target, partial_qty=plan.partial_qty, theme=plan.theme, plan=plan.to_dict(),
-                features=features_for(sig, plan, "buy_stop"),
-            )
+        tag = "qmag-" + uuid.uuid4().hex[:24]
+        pending = PendingPlan(
+            sig.symbol, sig.setup, report.asof, sig.entry, plan.stop, plan.shares, "", client_tag=tag,
+            entry_kind="buy_stop", target=plan.partial_target, partial_qty=plan.partial_qty, theme=plan.theme, plan=plan.to_dict(),
+            features=features_for(sig, plan, "buy_stop"),
         )
+        state.pending[sig.symbol] = asdict(pending)
+        state.checkpoint()
+        order = broker.buy_stop_bracket(sig.symbol, plan.shares, sig.entry, plan.stop, limit=limit, tag=tag)
+        pending.order_id = order.id
+        state.pending[sig.symbol] = asdict(pending)
+        state.checkpoint()
         report.plans.append(plan)
         exposure += plan.position_value
         cash -= plan.position_value
         slots -= 1
         report.heat_pct += float(plan.risk_dollars) / acct.equity if acct.equity > 0 else 0.0
+        state.checkpoint()
         report.actions.append(f"PLAN buy-stop {plan.summary()}")
 
     if not report.regime_ok and (triggered or watch):

@@ -35,6 +35,7 @@ import pandas as pd
 
 from .halt import halt_status, set_halt
 from .market_calendar import NY
+from .persistence import serialized
 
 if TYPE_CHECKING:  # pragma: no cover
     from .session import TradingSession
@@ -115,6 +116,7 @@ def _fetch_marks(session: "TradingSession", symbols: list[str], max_age_hours: f
     return marks, (f"no bars for {', '.join(missing)} from {session.s.data}" if missing else None)
 
 
+@serialized
 def build_snapshot(
     session: "TradingSession",
     frames: dict[str, pd.DataFrame] | None = None,

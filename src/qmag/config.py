@@ -662,6 +662,28 @@ class AdvisorSettings:
 
 
 @dataclass(frozen=True)
+class AutonomySettings:
+    """Automatic experiments; risk and credentials remain outside the learner."""
+    enabled: bool = True
+    auto_promote: bool = True
+    research_weekday: str = "sunday"
+    research_time: str = "13:00"
+    min_history_days: int = 300
+    min_forward_days: int = 20
+    min_forward_trades: int = 30
+    max_trial_days: int = 90
+    max_candidates: int = 8
+    minimum_return_lift: float = 0.005
+    max_drawdown: float = 0.10
+    rollback_drawdown: float = 0.08
+    canary_risk_fraction: float = 0.25
+    canary_trades: int = 20
+    train_outcome_model: bool = True
+    min_model_records: int = 80
+    retention_days: int = 180
+
+
+@dataclass(frozen=True)
 class StrategyConfig:
     momentum: MomentumFilter = field(default_factory=MomentumFilter)
     breakout: BreakoutSetup = field(default_factory=BreakoutSetup)
@@ -682,6 +704,7 @@ class StrategyConfig:
     entry: EntrySettings = field(default_factory=EntrySettings)
     learning: LearningSettings = field(default_factory=LearningSettings)
     advisor: AdvisorSettings = field(default_factory=AdvisorSettings)
+    autonomy: AutonomySettings = field(default_factory=AutonomySettings)
 
     @property
     def auxiliary_symbols(self) -> set[str]:

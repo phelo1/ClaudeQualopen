@@ -684,7 +684,7 @@ def probe_connections(session: "TradingSession", names: Iterable[str] | None = N
 
     if want("broker"):
         try:
-            reg.record_result("broker", session.broker.account, detail=f"{s.broker}: account read", items_of=lambda a: None)
+            reg.record_result("broker", session.account, detail=f"{s.broker}: account read", items_of=lambda a: None)
         except Exception:
             pass
     if want("price_data"):
