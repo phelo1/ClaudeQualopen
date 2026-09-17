@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · ClaudeQual</title>
+<style>
+  :root { --bg:#0a0e1a; --panel:#121a2c; --panel-2:#182236; --border:#223050; --text:#e6ebf4; --muted:#8592ab; --red:#f87171; --blue:#3b82f6; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); background-image: radial-gradient(900px 400px at 50% -100px, rgba(59,130,246,.14), transparent 70%); color:var(--text); font:14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .card { width:min(380px, 92vw); background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:26px 26px 22px; box-shadow: 0 20px 60px -30px rgba(0,0,0,.9); }
+  .brand { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+  .mark { width:30px; height:30px; border-radius:8px; background:linear-gradient(135deg,#3b82f6,#22d3ee); display:grid; place-items:center; font-weight:800; color:#06101f; }
+  h1 { font-size:18px; margin:0 0 4px; } h1 span { color:var(--muted); font-weight:400; }
+  p { color:var(--muted); margin:0 0 18px; }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+  input { width:100%; background:var(--panel-2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px 12px; font-size:15px; }
+  input:focus { outline:none; border-color:var(--blue); }
+  button { width:100%; margin-top:14px; padding:10px 12px; border:0; border-radius:8px; background:var(--blue); color:#fff; font-weight:600; font-size:14px; cursor:pointer; }
+  .err { color:var(--red); margin:10px 0 0; font-size:13px; }
+  .foot { margin-top:16px; font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+<form class="card" method="post" action="/login" autocomplete="off">
+  <div class="brand"><span class="mark">q</span><h1>qmag <span>· momentum desk</span></h1></div>
+  <p>This desk is password protected.</p>
+  <label for="pw">Password</label>
+  <input id="pw" name="password" type="password" autofocus required autocomplete="current-password">
+  <input type="hidden" name="next" value="{{ next }}">
+  <button type="submit">Sign in</button>
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <div class="foot">Signed-in browsers stay signed in for 7 days. Changing the password on the settings page signs everyone out.</div>
+</form>
+</body>
+</html>

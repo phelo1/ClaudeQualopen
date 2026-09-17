@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}ClaudeQual · Momentum workspace{% endblock %}</title>
+<script>try { document.documentElement.dataset.theme = localStorage.getItem('cq-theme') || 'light'; } catch(e) {}</script>
+<link rel="stylesheet" href="/static/components.css">
+<link rel="stylesheet" href="/static/app.css">
+
+{% block head %}{% endblock %}
+</head>
+<body>
+{% set active = active if active is defined else '' %}
+<a href="#workspace" class="skip-link">Skip to content</a>
+<aside class="sidebar">
+  <a class="cq-brand" href="/" aria-label="ClaudeQual home"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 22V12m9 13V6m9 16V10"/><path d="m4 17 8-5 8 7 8-8"/></svg><span>ClaudeQual<span class="brand-sub">RESEARCH & EXECUTION</span></span></a>
+  <div class="workspace-label">WORKSPACE <span>01</span></div>
+  <nav class="side-nav" aria-label="Main navigation">
+    {% for key, url, label, shape in [('overview','/','Overview','M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z'),('desk','/desk','Trading desk','M3 17l5-5 4 3 8-10 M15 5h5v5'),('accounts','/accounts','Portfolio','M3 7h18v14H3z M8 7V3h8v4'),('journal','/journal','Trade journal','M5 3h14v18H5z M9 8h6 M9 12h6 M9 16h4'),('learning','/learning','Learning lab','M9 3h6 M10 3v7L4 20h16l-6-10V3 M8 15h8'),('insider','/insider','Options research','M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14 M15 15l6 6'),('advisor','/advisor','AI advisor','M3 4h18v13H8l-5 4z M7 9h10 M7 13h6')] %}
+    <a href="{{ url }}" class="{{ 'selected' if active == key }}" {% if active == key %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="{{ shape }}"/></svg>{{ label }}{% if active == key %}<span class="nav-dot"></span>{% endif %}</a>
+    {% endfor %}
+    <div class="nav-divider"></div>
+    <a href="/status" class="{{ 'selected' if active == 'status' }}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12h5l3-8 4 16 3-8h5"/></svg>Connections</a>
+    <a href="/settings" class="{{ 'selected' if active == 'settings' }}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16 M4 17h16 M9 4v6 M15 14v6"/></svg>Settings</a>
+  </nav>
+  <div class="sidebar-bottom"><div class="mode-indicator"><span class="status-dot"></span>{{ 'Live account' if settings.live else 'Paper workspace' }}</div><p>{{ settings.desk or 'Your momentum research desk' }}</p><a href="/status#halt" class="safety-link">Trading controls <span>↗</span></a><div class="sidebar-meta"><span>ClaudeQual / 0.2</span><button type="button" id="theme-toggle" aria-label="Toggle light and dark theme">◐</button></div></div>
+</aside>
+<div class="app-shell" id="workspace" tabindex="-1">
+<header class="app-header">
+  <div class="topbar">
+    <div class="breadcrumb">Workspace <span>/</span> <strong>{{ {'overview':'Overview','desk':'Trading desk','accounts':'Portfolio','journal':'Trade journal','learning':'Learning lab','insider':'Options research','advisor':'AI advisor','status':'Connections','settings':'Settings'}.get(active, 'Research') }}</strong></div>
+    <div class="right"><form class="lookup" onsubmit="event.preventDefault(); const s=this.sym.value.trim().toUpperCase(); if(s) location.href='/symbol/'+encodeURIComponent(s);"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg><input name="sym" placeholder="Research a symbol…" aria-label="Look up a ticker" autocomplete="off"><button type="submit" class="ghost">Go ↗</button></form>{% if settings.auth %}<a class="signout" href="/logout">Sign out</a>{% endif %}</div>
+  </div>
+  <div class="strip">
+    {% if settings.halt %}<a class="pill off" href="/status#halt" title="Kill switch thrown by {{ settings.halt.by }} at {{ settings.halt.at[:16] }}: {{ settings.halt.reason or 'no reason given' }} — no new entries anywhere; open positions are still managed"><i class="dot"></i>TRADING HALTED</a>{% endif %}
+    <span class="pill {{ 'live' if settings.live else '' }}" title="{{ 'LIVE money: orders go to the real account' if settings.live else 'Paper trading: no real money moves' }} · broker {{ settings.broker }} · data {{ settings.data }}">{% if settings.broker == 'paper' %}paper ledger{% else %}{{ 'LIVE · ' if settings.live else 'paper · ' }}{{ settings.broker }}{% endif %}</span>
+    {% if settings.health %}{% set h = settings.health %}<a class="pill {{ 'on' if h.overall == 'ok' else 'off' if h.overall == 'error' else 'warn' }}" href="/status" title="Status of every data, broker, context and model connection"><i class="dot"></i>connections · {{ 'all OK' if h.overall == 'ok' else (h.issues ~ ' issue' ~ ('s' if h.issues != 1 else '')) if h.issues else 'not checked yet' }}</a>{% endif %}
+    {% set page_pills %}{% block header_pills %}{% endblock %}{% endset %}
+    {% if page_pills|trim %}<span class="sep" aria-hidden="true"></span>{{ page_pills }}{% endif %}
+    <div class="actions-right">{% block header_actions %}{% endblock %}</div>
+  </div>
+</header>
+
+{% if settings.halt %}
+<div class="banner gap">TRADING HALTED <span class="what">— kill switch thrown by {{ settings.halt.by }} {{ settings.halt.at|ago }}{% if settings.halt.reason %}: {{ settings.halt.reason }}{% endif %}. No new entries from the daemon, the dashboard or the CLI; resting buy-stops are cancelled; open positions keep their stops, targets and trails{% if settings.halt.flattened %} (positions were flattened){% endif %}. <a href="/status#halt">Resume trading →</a></span></div>
+{% endif %}
+{% if settings.health and settings.health.data_gaps %}
+<div class="banner gap">DATA GAPS IN THE LAST CYCLE <span class="what">— {{ settings.health.data_gaps|join(' · ') }}. Missing inputs are never substituted; affected checks fail. <a href="/status">Connection status →</a></span></div>
+{% endif %}
+
+{% if active in ('desk','settings','status') %}<details class="service-disclosure"><summary>Research services <span class="m">· configuration and model roles</span></summary><div>{% include "_services.html" %}</div></details>{% endif %}
+{% block content %}{% endblock %}
+
+<footer><span>CLAUDEQUAL <span class="m">· Evidence before action.</span></span><span>{% block footer %}{% endblock %}</span></footer>
+</div>
+
+<dialog id="zoom"><img id="zoom-img" alt=""></dialog>
+<div id="tip" role="tooltip"></div>
+<script>
+  // Hover / focus / tap help for every element carrying data-tip (the ⓘ icons and labelled stats).
+  (() => {
+    const tip = document.getElementById('tip');
+    let pinned = null;
+    const show = (el) => {
+      tip.textContent = el.dataset.tip; tip.style.display = 'block';
+      const r = el.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+      let x = r.left + r.width / 2 - w / 2; x = Math.max(8, Math.min(x, window.innerWidth - w - 8));
+      let y = r.top - h - 8; if (y < 8) y = r.bottom + 8;
+      tip.style.left = x + 'px'; tip.style.top = y + 'px';
+    };
+    const hide = () => { if (!pinned) tip.style.display = 'none'; };
+    const target = (e) => e.target.closest && e.target.closest('[data-tip]');
+    document.addEventListener('mouseover', (e) => { const el = target(e); if (el) show(el); });
+    document.addEventListener('mouseout', (e) => { if (target(e)) hide(); });
+    document.addEventListener('focusin', (e) => { const el = target(e); if (el) show(el); });
+    document.addEventListener('focusout', (e) => { if (target(e)) hide(); });
+    document.addEventListener('click', (e) => {
+      const el = target(e);
+      if (el && el.classList.contains('info')) { e.preventDefault(); pinned = pinned === el ? null : el; document.querySelectorAll('.info.open').forEach(x => x.classList.remove('open')); if (pinned) { el.classList.add('open'); show(el); } else tip.style.display = 'none'; }
+      else if (pinned) { pinned.classList.remove('open'); pinned = null; tip.style.display = 'none'; }
+    });
+    window.addEventListener('scroll', () => { if (pinned) show(pinned); else tip.style.display = 'none'; }, { passive: true });
+  })();
+</script>
+<script>
+  const dlg = document.getElementById('zoom'), zimg = document.getElementById('zoom-img');
+  document.querySelectorAll('.card img, .chart img').forEach(img => img.addEventListener('click', () => { zimg.src = img.src; dlg.showModal(); }));
+  dlg.addEventListener('click', () => dlg.close());
+</script>
+<script>
+document.getElementById('theme-toggle').addEventListener('click', () => {
+ const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+ document.documentElement.dataset.theme = theme;
+ try { localStorage.setItem('cq-theme', theme); } catch(e) {}
+});
+document.addEventListener('keydown', e => {if(e.key === 'Escape') document.getElementById('tip').style.display = 'none';});
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,31 @@
+# /etc/systemd/system/qmag.service
+#
+# sudo useradd -r -m qmag && sudo -u qmag git clone <repo> /home/qmag/qmag
+# cd /home/qmag/qmag && sudo -u qmag python3 -m venv .venv && sudo -u qmag .venv/bin/pip install -e ".[alpaca,ibkr]"
+# sudo cp deploy/qmag.service /etc/systemd/system/ && sudo systemctl daemon-reload
+# sudo systemctl enable --now qmag qmag-dashboard   # (copy this unit as qmag-dashboard.service with ExecStart=... dashboard)
+#
+# Credentials go in /home/qmag/qmag/.env (ALPACA_API_KEY=..., ALPACA_SECRET_KEY=..., IBKR_HOST=...).
+
+[Unit]
+Description=qmag momentum trading daemon (Qullamaggie setups)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qmag
+WorkingDirectory=/home/qmag/qmag
+EnvironmentFile=-/home/qmag/qmag/.env
+Environment=TZ=America/New_York
+# Change --broker to alpaca / ibkr / alpaca-live / ibkr-live. Live needs --yes-live.
+ExecStart=/home/qmag/qmag/.venv/bin/qmag daemon --broker paper --state-dir /home/qmag/qmag/paper_state
+Restart=always
+RestartSec=30
+KillSignal=SIGINT
+TimeoutStopSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

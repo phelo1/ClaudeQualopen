@@ -1,0 +1,268 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% set ctx = context %}
+{% set r = plan.rationale if plan and plan.rationale else {} %}
+
+{% block title %}{{ title }} · ClaudeQual{% endblock %}
+
+{% block head %}
+<style>
+  .act { margin-top: 12px; padding: 12px 14px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--blue); }
+  .act.live { border-left-color: var(--red); }
+  .act > .k { font-size: 12px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .act .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .act .btns button.ghost { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+  .act .btns button.danger { color: var(--red); border-color: rgba(239,68,68,.5); }
+  .act .msg { margin-top: 10px; padding: 8px 10px; border-radius: 8px; font-size: 12px; line-height: 1.5; background: rgba(59,130,246,.1); border-left: 3px solid var(--blue); }
+  .act .msg.ok { background: rgba(34,197,94,.1); border-left-color: var(--green); }
+  .act .msg.bad { background: rgba(239,68,68,.1); border-left-color: var(--red); }
+  .act .msg .alt { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+</style>
+{% endblock %}
+
+{% block header_pills %}
+  {% set unknown = regime_known is defined and not regime_known %}
+  <span class="pill {{ 'warn' if unknown else 'on' if regime_ok else 'off' }}" title="{{ regime_note }}"><i class="dot"></i>{{ 'Regime unknown' if unknown else 'Risk-on' if regime_ok else 'Risk-off' }}</span>
+  <span class="pill">{{ asof }}{% if lookup %} · live lookup{% else %} · last cycle{% endif %}</span>
+{% endblock %}
+
+{% block header_actions %}
+  <a class="btn ghost" href="/">← Desk</a>
+{% endblock %}
+
+{% block content %}
+<main>
+  <section class="col-8 chart">
+    <h2>
+      {{ symbol }}
+      <span class="pill {{ 'on' if status == 'triggered' else 'warn' if status == 'watch' else 'm' }}">{{ 'setup triggered' if status == 'triggered' else 'flag ready · buy-stop at pivot' if status == 'watch' else 'no setup on the last bar' }}</span>
+      {% if plan %}<span class="pill {{ 'on' if plan.ok else 'off' }}">{{ 'PASS' if plan.ok else 'REJECT' }} · {{ plan.setup.replace('_', ' ') }}</span>{% endif %}
+      {% if lookup and momentum_leader is defined %}<span class="pill {{ 'on' if momentum_leader else 'm' }}">{{ 'momentum leader' if momentum_leader else 'not a momentum leader' }}</span>{% endif %}
+      {% if theme is defined and theme %}<span class="pill v">{{ theme|replace('Industry: ', '') }}{% if theme_pct is not none %} · top {{ ((1 - theme_pct) * 100)|round|int }}%{% endif %}</span>{% endif %}
+    </h2>
+    {% if report_plan is defined and report_plan %}<p class="m" style="margin:0 0 10px">This ticker was sized in the last cycle — <a href="/plan/{{ symbol }}">see that plan and its justification</a>. Below is a fresh read of the latest bar.</p>{% endif %}
+    {% if chart %}<img src="{{ chart }}" alt="{{ symbol }} annotated chart">{% else %}<div class="empty">No chart rendered.</div>{% endif %}
+    {% if chart_note is defined and chart_note %}<p class="m" style="margin:8px 0 0; font-size:12px">{{ chart_note }}</p>{% endif %}
+  </section>
+
+  <section class="col-4">
+    <h2>Plan</h2>
+    {% if plan %}
+    <div class="levels" style="grid-template-columns: repeat(2, 1fr)">
+      <div><div class="k">Entry ({{ 'buy-stop' if status == 'watch' else 'market' if plan.setup == 'episodic_pivot' else 'buy-stop' }})</div><div class="v g">{{ '%.2f'|format(plan.entry) }}</div></div>
+      <div><div class="k">Stop · −{{ '%.1f%%'|format((1 - plan.stop / plan.entry) * 100) }}</div><div class="v r">{{ '%.2f'|format(plan.stop) }}</div></div>
+      <div><div class="k">Partial target (+{{ '%.0f'|format((plan.partial_target - plan.entry) / (plan.entry - plan.stop)) if plan.partial_target else '–' }}R)</div><div class="v b">{{ '%.2f'|format(plan.partial_target) if plan.partial_target else '–' }}</div></div>
+      <div><div class="k">Shares · ${{ '{:,.0f}'.format(plan.position_value) }}</div><div class="v">{{ plan.shares }}</div></div>
+      <div><div class="k">Risk</div><div class="v">${{ '{:,.0f}'.format(plan.risk_dollars) }} <span class="m" style="font-weight:400">({{ '%.2f%%'|format(plan.risk_pct * 100) }})</span></div></div>
+      <div><div class="k">Position</div><div class="v">{{ '%.1f%%'|format(plan.position_pct * 100) }} <span class="m" style="font-weight:400">of equity</span></div></div>
+      <div><div class="k">Score</div><div class="v">{{ '%.2f'|format(plan.score) }}</div></div>
+      <div><div class="k">Context score</div><div class="v {{ m.score_class(plan.context_score) }}">{{ '%+.2f'|format(plan.context_score) if plan.context_score is not none else '–' }}</div></div>
+    </div>
+    {{ m.verdict_box(plan) }}
+    {% if lookup %}
+    <div id="act" class="act {{ 'live' if settings.live }}">
+      <div class="k">Act on this <span class="pill {{ 'off' if settings.live else 'on' }}" style="font-weight:600">{{ 'LIVE ACCOUNT' if settings.live else 'paper · ' ~ settings.broker }}</span></div>
+      <div class="m" style="font-size:12px; line-height:1.5">
+        {% if status == 'triggered' and plan.ok %}Above the pivot and every check passes. <b>Buy</b> sends a market order for <b>{{ plan.shares }} sh</b> (${{ '{:,.0f}'.format(plan.position_value) }}, risk ${{ '{:,.0f}'.format(plan.risk_dollars) }}) with the stop {{ '%.2f'|format(plan.stop) }}{% if plan.partial_target %} and target {{ '%.2f'|format(plan.partial_target) }}{% endif %} attached; the trader manages it from there. The confirmation gates (holding above the pivot, volume pace, opening range, not extended) are re-checked on fresh data when you click.
+        {% elif status == 'triggered' %}Above the pivot but <b>{{ plan.failed_checks|join(', ') }}</b> failed. You can still <b>override</b> — the order is sent with the plan's stop and target, and the trade is journaled as an override so the review can score your calls against the rules.
+        {% elif status == 'watch' %}The flag is ready but price has not cleared {{ '%.2f'|format(plan.entry) }}. <b>Arm</b> puts it on the focused passes' list: they buy at market once the pivot breaks and holds on volume{% if config.entry.mode == 'resting' %} (resting mode: the next scan parks a buy-stop){% endif %}. Buying below the pivot is not offered.
+        {% endif %}
+        The plan is rebuilt from fresh data before anything is sent.
+      </div>
+      <div class="btns">
+        {% if status == 'triggered' and plan.ok %}<button data-action="buy">Buy {{ plan.shares }} sh at market</button>{% endif %}
+        {% if status == 'triggered' and not plan.ok %}<button class="ghost danger" data-action="override">Override and buy {{ plan.shares }} sh</button>{% endif %}
+        <button class="ghost" data-action="arm">{{ 'Arm this setup' if status == 'watch' else 'Arm for the focused passes' }}</button>
+      </div>
+      <div id="act-msg" class="msg" hidden></div>
+    </div>
+    {% endif %}
+    {{ m.gaps_box(plan.data_gaps) }}
+    {{ m.committee_box(plan.committee, full=True) }}
+    {{ m.reviewer_box(plan.reviewer, plan.notes.reviewer if plan.notes else none, config) }}
+    <h2 style="margin-top:14px">Checklist</h2>
+    <div class="checks">
+      {% for k, v in plan.checks.items() %}<span class="check {{ 'ok' if v else 'bad' }}">{{ '✓' if v else '✗' }} {{ k.replace('_', ' ') }}</span>{% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">
+      {% if lookup %}Nothing to size: {{ symbol }} has neither a breakout flag within reach of its pivot nor an episodic-pivot gap on the latest bar.
+      {% if last_close is defined %}<div class="m" style="margin-top:8px">Last close {{ '%.2f'|format(last_close) }}{% if facts.adr_pct %} · ADR {{ '%.1f%%'|format(facts.adr_pct) }}{% endif %}{% if facts.gain_1m is not none %} · 1m {{ '%+.0f%%'|format(facts.gain_1m * 100) }}{% endif %}{% if facts.gain_3m is not none %} · 3m {{ '%+.0f%%'|format(facts.gain_3m * 100) }}{% endif %}{% if facts.gain_6m is not none %} · 6m {{ '%+.0f%%'|format(facts.gain_6m * 100) }}{% endif %}</div>{% endif %}
+      {% else %}No plan.{% endif %}
+    </div>
+    {% if data_gaps is defined %}{{ m.gaps_box(data_gaps) }}{% endif %}
+    {% endif %}
+    {% if lookup and facts %}
+    <h2 style="margin-top:14px">Tape</h2>
+    <div class="ctx">
+      {% if facts.gain_1m is not none %}<div><div class="k">1 month</div><div class="v {{ 'g' if facts.gain_1m > 0 else 'r' }}">{{ '%+.0f%%'|format(facts.gain_1m * 100) }}</div></div>{% endif %}
+      {% if facts.gain_3m is not none %}<div><div class="k">3 months</div><div class="v {{ 'g' if facts.gain_3m > 0 else 'r' }}">{{ '%+.0f%%'|format(facts.gain_3m * 100) }}</div></div>{% endif %}
+      {% if facts.gain_6m is not none %}<div><div class="k">6 months</div><div class="v {{ 'g' if facts.gain_6m > 0 else 'r' }}">{{ '%+.0f%%'|format(facts.gain_6m * 100) }}</div></div>{% endif %}
+      {% if facts.adr_pct is not none %}<div><div class="k">ADR</div><div class="v">{{ '%.1f%%'|format(facts.adr_pct) }}</div></div>{% endif %}
+      {% if facts.dollar_vol_20 is not none %}<div><div class="k">$ vol 20d</div><div class="v">${{ m.humanize(facts.dollar_vol_20) }}</div></div>{% endif %}
+      {% if facts.rvol_20 is not none %}<div><div class="k">Rel. volume</div><div class="v">{{ '%.1fx'|format(facts.rvol_20) }}</div></div>{% endif %}
+    </div>
+    {% endif %}
+  </section>
+
+  {% if plan %}
+  <section class="col-7">
+    <h2>Justification</h2>
+    <div class="prose">
+      <h3>Setup</h3><p>{{ r.setup }}</p>
+      <h3>Entry</h3><p>{{ r.entry }}</p>
+      <h3>Position size</h3><p>{{ r.size }}</p>
+      <h3>Stop loss</h3><p>{{ r.stop }}</p>
+      <h3>Profit taking</h3><p>{{ r.profit_plan }}</p>
+      <h3>Market, sector &amp; sentiment</h3><p>{{ r.context }}</p>
+    </div>
+  </section>
+
+  <section class="col-5">
+    <h2>Bull vs bear <span class="m sub">written by the rules engine from the numbers{% if plan.committee and plan.committee.get('seats') %}; the AI committee's debate is in its box above{% endif %}</span></h2>
+    <div class="prose">
+      <div class="bull"><h3 class="g">Bull case</h3><p>{{ r.bull_case }}</p></div>
+      <div class="bear" style="margin-top:14px"><h3 class="r">Bear case</h3><p>{{ r.bear_case }}</p></div>
+      <h3 style="margin-top:14px">Verdict</h3><p>{{ r.verdict }}</p>
+    </div>
+  </section>
+
+  {% if plan.reviewer or (config and config.reviewer and config.reviewer.enabled) %}
+  <section class="col-12">
+    <h2>LLM reviewer <span class="m sub">strict-JSON second opinion on the full edge bundle · {{ 'considered by the trader (' ~ config.reviewer.mode|mode_label ~ ')' if config and config.reviewer and config.reviewer.mode != 'advisory' else 'advisory only' }}</span></h2>
+    {{ m.reviewer_panel(plan.reviewer, plan.notes.reviewer if plan.notes else none, config) }}
+  </section>
+  {% endif %}
+  {% endif %}
+
+  <section class="col-12">
+    <h2>Context <span class="m sub">news · social · options flow · fundamentals</span>
+      {% if ctx and ctx.available %}{% for name, ok in ctx.available.items() %}<span class="pill {{ 'on' if ok else 'off' }}" title="{{ ctx.errors.get(name, '') if ctx.errors else '' }}" style="font-weight:500">{{ name.replace('_', ' ') }}</span>{% endfor %}{% endif %}
+    </h2>
+    {% if ctx %}
+    {{ m.context_strip(ctx) }}
+    <div class="split" style="margin-top:16px">
+      <div>
+        <h2>Headlines <span class="count">{{ ctx.headlines|length }}</span></h2>
+        {% if ctx.headlines %}
+        <div class="table-wrap"><table>
+          <tr><th>When</th><th>Source</th><th>Headline</th><th class="num">Score</th></tr>
+          {% for h in ctx.headlines[:25] %}
+          <tr>
+            <td class="m">{{ h.when[:10] }}</td>
+            <td class="m">{{ h.source }}</td>
+            <td class="wrap">{% if h.url %}<a href="{{ h.url }}" target="_blank" rel="noopener">{{ h.title }}</a>{% else %}{{ h.title }}{% endif %}{% for t in h.tags %}<span class="tag">{{ t }}</span>{% endfor %}</td>
+            <td class="num {{ m.score_class(h.score) }}">{{ '%+.2f'|format(h.score) }}</td>
+          </tr>
+          {% endfor %}
+        </table></div>
+        {% else %}<div class="empty">No headlines in the lookback window.</div>{% endif %}
+      </div>
+      <div>
+        <h2>Social <span class="count">{{ ctx.social_messages }}</span> <span class="m sub">{{ ctx.social_sources|join(', ') }}</span></h2>
+        {% if ctx.social_messages %}
+        <div class="stats" style="grid-template-columns: repeat(3, 1fr)">
+          <div class="stat"><div class="k">Bullish</div><div class="v g">{{ ctx.social_bullish }}</div></div>
+          <div class="stat"><div class="k">Bearish</div><div class="v r">{{ ctx.social_bearish }}</div></div>
+          <div class="stat"><div class="k">Score</div><div class="v {{ m.score_class(ctx.social_score) }}">{{ '%+.2f'|format(ctx.social_score) if ctx.social_score is not none else '–' }}</div></div>
+        </div>
+        {% if ctx.social_score is not none and ctx.social_score >= 0.85 %}<p class="a" style="margin:8px 0 0">Crowded: near-unanimous bullishness is what tops look like; episodic pivots are skipped above this level.</p>{% endif %}
+        <div class="samples" style="margin-top:10px">{% for s in ctx.social_samples[:8] %}<div>{{ s }}</div>{% endfor %}</div>
+        {% else %}<div class="empty">No social chatter found{% if ctx.errors and ctx.errors.reddit %} · Reddit: {{ ctx.errors.reddit }}{% endif %}.</div>{% endif %}
+
+        <h2 style="margin-top:16px">Fundamentals &amp; events</h2>
+        <div class="ctx">
+          <div><div class="k">Next earnings</div><div class="v">{{ ctx.earnings_date or '–' }}</div></div>
+          <div><div class="k">Insider trans.</div><div class="v {{ 'g' if ctx.insider_trans_pct is not none and ctx.insider_trans_pct > 0 else 'r' if ctx.insider_trans_pct is not none and ctx.insider_trans_pct < 0 else '' }}">{{ '%+.1f%%'|format(ctx.insider_trans_pct) if ctx.insider_trans_pct is not none else '–' }}</div></div>
+          <div><div class="k">Inst. own</div><div class="v">{{ '%.1f%%'|format(ctx.inst_own_pct) if ctx.inst_own_pct is not none else '–' }}</div></div>
+          <div><div class="k">Analyst recom</div><div class="v">{{ '%.1f'|format(ctx.analyst_recom) if ctx.analyst_recom is not none else '–' }} <span class="m" style="font-weight:400;font-size:11px">1 buy · 5 sell</span></div></div>
+          <div><div class="k">Target price</div><div class="v">{{ '%.2f'|format(ctx.target_price) if ctx.target_price is not none else '–' }}</div></div>
+        </div>
+      </div>
+    </div>
+    <h2 style="margin-top:18px">Unusual options flow <span class="m sub">Unusual Whales · {{ 'on' if config and config.options_flow and config.options_flow.enabled else 'off' }}{% if config and config.options_flow and config.options_flow.enabled %} · trades ≥ ${{ '%.0f'|format(config.options_flow.min_premium / 1000) }}k in the last {{ config.options_flow.lookback_days }}d, DTE ≤ {{ config.options_flow.max_dte }}{% endif %}</span></h2>
+    {{ m.flow_panel(ctx, config) }}
+    <h2 style="margin-top:18px">Unusual Whales edge score <span class="m sub">weighted evidence · {{ 'on' if config and config.edge and config.edge.enabled and config.options_flow.enabled else 'off' }}{% if config and config.edge and config.edge.enabled %} · {{ 'gate' if config.edge.gate else 'advisory' }} · threshold {{ '%+.2f'|format(config.edge.threshold) }}, coverage ≥ {{ '%.0f%%'|format(config.edge.min_coverage * 100) }}{% endif %}</span></h2>
+    {{ m.edge_panel(ctx, config, edge_groups) }}
+    {% else %}
+    <div class="empty">Context layer disabled or no data for {{ symbol }}.</div>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}
+
+{% block footer %}
+  {{ settings.data }} · {{ settings.broker }} · {{ 'computed on demand; nothing was traded or saved except the chart' if lookup else 'from the last cycle report' }} · {{ regime_note }}
+{% endblock %}
+
+{% block scripts %}
+{% if lookup and plan %}
+<script>
+(function () {
+  const box = document.getElementById('act');
+  if (!box) return;
+  const symbol = {{ symbol|tojson }};
+  const live = {{ 'true' if settings.live else 'false' }};
+  const msg = document.getElementById('act-msg');
+  const buttons = () => box.querySelectorAll('button');
+
+  function show(text, cls, alts) {
+    msg.hidden = false;
+    msg.className = 'msg ' + (cls || '');
+    msg.textContent = text;
+    if (alts && alts.length) {
+      const row = document.createElement('div');
+      row.className = 'alt';
+      alts.forEach(a => {
+        const b = document.createElement('button');
+        b.className = a.cls || 'ghost';
+        b.textContent = a.label;
+        b.addEventListener('click', () => act(a.action, a.confirm));
+        row.appendChild(b);
+      });
+      msg.appendChild(row);
+    }
+  }
+
+  const labels = { buy: 'Buy at market', override: 'OVERRIDE the failed checks and buy', arm: 'Arm' };
+
+  async function act(action, confirmLive) {
+    if (action === 'override' && !confirm(`${symbol}: the checks or confirmation gates failed. Override and send the order anyway? The trade is journaled as an override.`)) return;
+    if (live && action !== 'arm' && !confirmLive) {
+      if (!confirm(`LIVE ACCOUNT - ${labels[action]} ${symbol} with real money?`)) return;
+      confirmLive = true;
+    }
+    buttons().forEach(b => b.disabled = true);
+    show(action === 'arm' ? `Arming ${symbol}…` : `Rebuilding the plan from fresh data and sending the order for ${symbol}…`, '');
+    let res, body;
+    try {
+      res = await fetch(`/api/symbol/${encodeURIComponent(symbol)}/trade`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, confirm_live: !!confirmLive }),
+      });
+      body = await res.json();
+    } catch (e) {
+      show('Request failed: ' + e, 'bad');
+      buttons().forEach(b => b.disabled = false);
+      return;
+    }
+    if (res.ok) {
+      show(body.message + (action === 'arm' ? '' : ' Taking you to the desk…'), 'ok');
+      if (action !== 'arm') setTimeout(() => { window.location.href = '/'; }, 2500);
+      else buttons().forEach(b => b.disabled = false);
+      return;
+    }
+    const d = body.detail || body;
+    const alts = [];
+    if (d.can_confirm) alts.push({ label: `Yes, send it on the LIVE account`, action, confirm: true, cls: 'danger' });
+    if (d.can_override) alts.push({ label: 'Override and buy anyway', action: 'override', cls: 'danger' });
+    if (d.can_arm) alts.push({ label: 'Arm it instead', action: 'arm' });
+    show((d.message || 'refused') + (d.problems && d.problems.length ? ' - ' + d.problems.join('; ') : ''), 'bad', alts);
+    buttons().forEach(b => b.disabled = false);
+  }
+
+  box.querySelectorAll('.btns button').forEach(b => b.addEventListener('click', () => act(b.dataset.action, false)));
+})();
+</script>
+{% endif %}
+{% endblock %}

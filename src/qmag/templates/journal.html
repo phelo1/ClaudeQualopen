@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% set active = 'journal' %}
+{% import "_macros.html" as m %}
+{% block title %}Trade journal · ClaudeQual{% endblock %}
+{% block content %}
+<main class="overview"><div class="page-heading"><div><div class="eyebrow">The decision record</div><h1>Every outcome has a context.</h1><p>Review closed positions, exit reasons and the quality of the evidence.</p></div><a class="btn ghost" href="/learning">Open learning lab ↗</a></div>
+<section class="panel"><div class="panel-heading"><h2>Closed trades <span class="count-tag">{{ records|length }}</span></h2></div><p class="panel-subtitle">R expresses a result relative to the initial price risk. Estimated exits are labelled; paper results are not live results.</p>
+<div class="journal-filter"><label for="journal-search">Symbol</label><input id="journal-search" type="search" placeholder="Filter by symbol…"><label for="evidence-filter">Evidence</label><select id="evidence-filter"><option value="">All evidence</option><option value="broker_verified">Broker verified</option><option value="paper_fill">Paper fill</option><option value="estimated">Estimated / legacy</option></select><span id="journal-count" class="m" style="font-size:11px" aria-live="polite"></span></div>
+{% if records %}<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Setup</th><th>Closed</th><th>Exit reason</th><th>Result {{ m.info('Recorded R multiple. This may be an estimate when the adapter cannot return an execution price. It is not a verified net return unless backed by reconciled execution and cost records.') }}</th><th>Evidence</th></tr></thead><tbody id="journal-rows">{% for row in records %}<tr data-symbol="{{ row.symbol }}" data-evidence="{{ row.evidence or 'estimated' }}"><td><a href="/symbol/{{ row.symbol|urlencode }}"><b>{{ row.symbol }}</b></a></td><td>{{ row.setup|replace('_',' ') }}</td><td>{{ row.closed_on }}</td><td>{{ row.exit_reason|replace('_',' ') }}</td><td class="{{ 'g' if (row.r_multiple or 0) > 0 else 'r' if (row.r_multiple or 0) < 0 }}">{{ '%+.2fR'|format(row.r_multiple) if row.r_multiple is not none else '—' }}</td><td><span class="evidence-label">{{ {'broker_verified':'Broker verified','paper_fill':'Paper fill'}.get(row.evidence, 'Estimated / legacy') }}</span></td></tr>{% endfor %}</tbody></table></div><p id="no-matches" class="empty" hidden>No records match these filters.</p>
+{% else %}<div class="empty-research"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h14v18H5z M9 8h6 M9 12h6 M9 16h4"/></svg><h3>The record starts with your first close.</h3><p>Closed positions will appear with their original setup, exit reason and execution evidence. No sample returns are displayed.</p><a class="btn ghost" href="/desk">Return to trading desk ↗</a></div>{% endif %}
+</section></main>
+{% endblock %}
+{% block scripts %}<script>
+const search=document.getElementById('journal-search'), evidence=document.getElementById('evidence-filter');
+function filterJournal(){let count=0;document.querySelectorAll('#journal-rows tr').forEach(row=>{row.hidden=!(row.dataset.symbol.toUpperCase().includes(search.value.trim().toUpperCase())&&(!evidence.value||row.dataset.evidence===evidence.value));if(!row.hidden)count++;});document.getElementById('journal-count').textContent=count+' matching records';const empty=document.getElementById('no-matches');if(empty)empty.hidden=count!==0;}
+search.addEventListener('input',filterJournal);evidence.addEventListener('change',filterJournal);filterJournal();
+</script>{% endblock %}

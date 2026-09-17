@@ -1,0 +1,44 @@
+[project]
+name = "qmag"
+version = "0.2.0"
+description = "Research, backtest, optimise and paper-trade Qullamaggie-style momentum setups (breakouts and episodic pivots)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "typer>=0.12",
+    "rich>=13.7",
+    "pyyaml>=6.0",
+    "yfinance>=0.2.40",
+    "requests>=2.31",
+    "matplotlib>=3.8",
+    "mplfinance>=0.12.10b0",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "finvizfinance>=1.0",
+    "vaderSentiment>=3.3",
+]
+
+[project.optional-dependencies]
+alpaca = ["alpaca-py>=0.30"]
+ibkr = ["ib_async>=1.0"]
+mt5 = ["MetaTrader5>=5.0; sys_platform == 'win32'"]
+finbert = ["transformers>=4.40", "torch>=2.2"]
+dev = ["pytest>=8.0", "httpx>=0.27", "pytest-xdist>=3.6"]
+
+[project.scripts]
+qmag = "qmag.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qmag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

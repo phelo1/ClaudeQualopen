@@ -1,0 +1,408 @@
+{% extends "base.html" %}
+{% set active = 'settings' %}
+
+{% block title %}Settings · ClaudeQual{% endblock %}
+
+{% block header_pills %}
+  <span class="pill">{{ settings.data }} · {{ settings.broker }}</span>
+{% endblock %}
+
+{% block header_actions %}
+{% endblock %}
+
+{% from "_macros.html" import info %}
+
+{% macro input(f, compact=False) %}
+  {% if f.kind == 'bool' %}
+    <label class="toggle" for="{{ f.key }}">
+      <input type="hidden" name="{{ f.key }}" value="0">
+      <input type="checkbox" id="{{ f.key }}" name="{{ f.key }}" value="1" {% if f.value %}checked{% endif %}>
+      <span><b>{{ f.label }}</b>{{ info(f.help) }}{% if compact %} <span class="m" style="font-size:11px">· {{ f.section }}</span>{% endif %}</span>
+    </label>
+  {% else %}
+    <div class="field {{ 'changed' if f.changed }}" data-key="{{ f.key }}">
+      <label for="{{ f.key }}"><span>{{ f.label }}{{ info(f.help ~ (' Comma separated.' if f.kind == 'list' else '')) }}{% if compact %} <span class="m">· {{ f.section }}</span>{% endif %}</span>{% if f.changed %}<span class="src saved" data-tip="Differs from the built-in default: {{ f.default }}">changed</span>{% endif %}</label>
+      {% if f.choices %}
+        <select id="{{ f.key }}" name="{{ f.key }}">{% for c in f.choices %}<option value="{{ c }}" {% if c == f.value %}selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+      {% elif f.kind in ('int', 'float') %}
+        <input type="number" id="{{ f.key }}" name="{{ f.key }}" value="{{ f.value }}" step="any" {% if f.optional %}placeholder="blank = off"{% endif %}>
+      {% elif f.kind == 'yaml' %}
+        <textarea id="{{ f.key }}" name="{{ f.key }}" class="code" style="min-height:90px" placeholder="theme name: [TICKER, TICKER]">{{ f.value }}</textarea>
+      {% else %}
+        <input type="text" id="{{ f.key }}" name="{{ f.key }}" value="{{ f.value }}" {% if f.optional %}placeholder="blank = none"{% endif %}>
+      {% endif %}
+    </div>
+  {% endif %}
+{% endmacro %}
+
+{% block content %}
+<main>
+  {% if saved %}
+  <div class="flash ok">
+    {% if saved == 'strategy' %}Strategy saved{% elif saved == 'yaml' %}Strategy YAML saved{% elif saved == 'connections' %}Connections saved{% elif saved == 'providers' %}AI provider saved{% elif saved == 'import' %}Settings imported{% elif saved == 'reset' %}Strategy reset to the built-in defaults{% else %}Saved{% endif %}
+    <span class="what">— in use now by this dashboard; a running daemon picks it up at the start of its next cycle.{% for n in notes %} {{ n }}.{% endfor %}</span>
+  </div>
+  {% endif %}
+  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+
+  <section>
+    <h2>Settings <span class="m sub">everything the desk runs on, saved in <code>{{ settings.state_dir }}</code> — strategy in <code>settings.yaml</code>, connections and API keys in <code>settings.env</code> (owner-only file permissions)</span></h2>
+    <div class="stats">
+      <div class="stat"><div class="k">Strategy in use</div><div class="v sm">{{ config_source }}</div></div>
+      <div class="stat"><div class="k">Price data</div><div class="v sm">{{ settings.data }}{% if requested_data != settings.data %} <span class="m">(from {{ requested_data }})</span>{% endif %}</div></div>
+      <div class="stat"><div class="k">Broker</div><div class="v sm {{ 'a' if settings.live }}">{{ settings.broker }}</div><div class="hint">set on the command line (<code>--broker</code>)</div></div>
+      <div class="stat"><div class="k">Saved connections</div><div class="v sm">{% set n = env_groups|sum(attribute='configured') %}{{ n }} value{{ '' if n == 1 else 's' }}</div></div>
+      <div class="stat"><div class="k">Backup</div><div class="v sm"><a href="/settings/export">Download settings</a> · <a href="#backup">upload</a></div></div>
+      {% if settings.public_url %}<div class="stat"><div class="k">Public address</div><div class="v sm"><a href="{{ settings.public_url }}">{{ settings.public_url|replace('https://', '') }}</a></div><div class="hint">quick tunnel — changes when the tunnel restarts; you are alerted when it does</div></div>{% endif %}
+    </div>
+    {% if cli_config and not yaml_exists %}<p class="m" style="margin:10px 0 0; font-size:12px">The strategy was loaded from <code>{{ cli_config }}</code>. Saving here writes <code>{{ yaml_path }}</code>, which takes over from that file from then on.</p>{% endif %}
+    {% if cli_overrides %}<p class="m" style="margin:10px 0 0; font-size:12px"><span class="a">Command-line overrides in effect for this process:</span> {% for k, v in cli_overrides.items() %}<code>{{ k }}={{ v }}</code>{{ ', ' if not loop.last }}{% endfor %}. They are applied on top of the saved file; the saved value is used by processes started without those flags.</p>{% endif %}
+  </section>
+
+  <section class="col-7">
+    <h2>Quick settings <span class="m sub">the dials that matter most; the full list is further down</span></h2>
+    <form method="post" action="/settings/strategy">
+      <div class="fields">
+        {% for f in quick %}{{ input(f, compact=True) }}{% endfor %}
+      </div>
+      <div class="savebar"><button type="submit">Save quick settings</button><span class="m">Other parameters keep their current values.</span></div>
+    </form>
+  </section>
+
+  <section class="col-5" id="backup">
+    <h2>Download &amp; upload <span class="m sub">move the desk or keep a backup</span></h2>
+    <div class="kcard" style="margin-bottom:12px">
+      <h3>Download</h3>
+      <p class="doc">One YAML file with the full strategy and the connection settings. API keys are left out unless you tick the box — a file with keys must be treated like a password.</p>
+      <div class="savebar" style="margin-top:0">
+        <a class="btn" href="/settings/export">Download without API keys</a>
+        <a class="btn ghost" href="/settings/export?secrets=1" onclick="return confirm('The downloaded file will contain your API keys in plain text. Continue?')">Download with API keys</a>
+      </div>
+    </div>
+    <div class="kcard">
+      <h3>Upload</h3>
+      <p class="doc">Accepts a bundle downloaded here or a plain strategy YAML (the same format <code>--config</code> reads). The file is validated first; nothing changes if it is invalid.</p>
+      <form method="post" action="/settings/import" enctype="multipart/form-data">
+        <div class="field"><input type="file" name="file" accept=".yaml,.yml,.txt,text/yaml,application/x-yaml" required></div>
+        <label class="toggle" style="margin:10px 0"><input type="checkbox" name="include_secrets" value="1" checked><span><b>Apply API keys from the file</b><div class="hint">Untick to import strategy and endpoints only and keep the keys saved here.</div></span></label>
+        <div class="savebar" style="margin-top:0"><button type="submit">Upload &amp; apply</button></div>
+      </form>
+    </div>
+  </section>
+
+  <section id="providers">
+    <h2>AI providers <span class="m sub">every vendor and key the AI seats can use — add as many as you like, then pick one per seat in <a href="#models">Language models</a></span></h2>
+    <div class="providers-grid">
+      {% for p in providers %}
+      <form method="post" action="/settings/providers" class="kcard provider {{ 'live' if p.configured }}" autocomplete="off" data-id="{{ p.id }}">
+        <input type="hidden" name="id" value="{{ p.id }}">
+        <h3>
+          <span>{{ p.label }} <span class="m" style="font-size:11px; font-weight:400">· {{ 'Gemini API' if p.kind == 'gemini' else 'OpenAI-compatible' }}{% if p.builtin %} · built in{% endif %}</span></span>
+          <span class="state {{ 'ok' if p.configured else 'not_configured' }}" title="{{ p.missing or 'usable' }}">{{ 'KEY SAVED' if p.has_key else ('NO KEY NEEDED' if p.configured else 'NO KEY') }}</span>
+        </h3>
+        <p class="doc">{{ presets[p.preset].note if p.preset in presets else 'Custom endpoint.' }} <span class="m">{{ p.endpoint }}</span></p>
+        <div class="fields" style="grid-template-columns: 1fr">
+          <div class="field"><label for="prov-{{ p.id }}-label"><span>Name</span></label><input type="text" id="prov-{{ p.id }}-label" name="label" value="{{ p.label }}"></div>
+          {% if p.kind == 'openai' %}
+          <div class="field"><label for="prov-{{ p.id }}-url"><span>Endpoint (base URL){{ info('The server that speaks the OpenAI /v1/chat/completions protocol. Vendors publish theirs; a local Ollama is http://127.0.0.1:11434/v1.') }}</span></label><input type="text" id="prov-{{ p.id }}-url" name="base_url" value="{{ p.base_url or '' }}" placeholder="https://api.example.com/v1"></div>
+          {% endif %}
+          <div class="field">
+            <label for="prov-{{ p.id }}-key"><span>API key</span>{% if p.has_key %}<span class="src {{ p.key_source }}" data-tip="{{ 'Saved in llm_providers.json (owner-only file)' if p.key_source == 'saved' else 'Inherited from the process environment (GEMINI_API_KEY / OPENAI_API_KEY); save one here to override it' }}">{{ p.key_source }}</span>{% endif %}</label>
+            <input type="password" id="prov-{{ p.id }}-key" name="api_key" value="" placeholder="{{ p.key_masked if p.has_key else ('not needed for a local server' if not p.needs_key else 'paste the key') }}" autocomplete="new-password">
+            {% if p.has_key and p.key_source == 'saved' %}<label style="font-size:11px; justify-content:flex-start"><input type="checkbox" name="clear_key" value="1" style="width:14px; height:14px"> forget the saved key</label>{% endif %}
+            {% if p.keys_at %}<div class="hint">Get a key: <a href="{{ p.keys_at }}" target="_blank" rel="noopener">{{ p.keys_at|replace('https://', '') }}</a></div>{% endif %}
+          </div>
+        </div>
+        <div class="testbar">
+          <button type="submit" class="mini">Save</button>
+          <button type="button" class="ghost mini prov-test" data-id="{{ p.id }}" title="Ask {{ p.label }} which models this key can call">Test</button>
+          {% if not p.builtin %}<button type="submit" class="ghost mini danger" formaction="/settings/providers/delete" onclick="return confirm('Remove {{ p.label }}? Seats that use it stop until you pick another provider.')">Remove</button>{% endif %}
+          <span class="result" data-for="prov-{{ p.id }}"><span class="m">{{ p.missing if p.missing else 'not tested yet' }}</span></span>
+        </div>
+      </form>
+      {% endfor %}
+      <form method="post" action="/settings/providers" class="kcard provider add" autocomplete="off" id="add-provider">
+        <h3><span>Add a provider</span></h3>
+        <p class="doc">Pick a vendor and paste its key. Anything that speaks the OpenAI chat protocol works — including a model server on this machine.</p>
+        <div class="fields" style="grid-template-columns: 1fr">
+          <div class="field"><label for="add-preset"><span>Vendor</span></label>
+            <select id="add-preset" name="preset">
+              {% for pid, pr in presets.items() if pid != 'gemini' %}<option value="{{ pid }}" data-label="{{ pr.label }}" data-url="{{ pr.base_url or '' }}" data-note="{{ pr.note }}" data-keys="{{ pr.keys_at or '' }}" {% if pid == 'anthropic' %}selected{% endif %}>{{ pr.label }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="field"><label for="add-label"><span>Name</span></label><input type="text" id="add-label" name="label" placeholder="Anthropic Claude"></div>
+          <div class="field"><label for="add-url"><span>Endpoint (base URL)</span></label><input type="text" id="add-url" name="base_url" placeholder="https://api.anthropic.com/v1"></div>
+          <div class="field"><label for="add-key"><span>API key</span></label><input type="password" id="add-key" name="api_key" placeholder="paste the key" autocomplete="new-password"><div class="hint" id="add-hint"></div></div>
+        </div>
+        <div class="testbar"><button type="submit" class="mini">Add provider</button><span class="m">Then pick it for a seat below and choose a model from its live list.</span></div>
+      </form>
+    </div>
+  </section>
+
+  <section id="models">
+    <h2>Language models <span class="m sub">which provider and model answers for each AI seat — the model field lists what that provider's key can call</span></h2>
+    <form method="post" action="/settings/strategy">
+      <div class="llm-status" id="llm-status">
+        {% for p in providers %}
+        <span class="pill {{ 'on' if p.configured }}" data-provider="{{ p.id }}">{{ p.label }}: {% if p.configured %}<span class="ok-text">{{ 'key saved' if p.has_key else 'no key needed' }}</span>{% else %}<span class="m">no key</span>{% endif %}</span>
+        {% endfor %}
+        <button type="button" class="btn ghost" id="llm-refresh">Refresh model lists</button>
+        <span class="m" id="llm-note">{% if providers|selectattr('configured')|list %}Loading the live model lists…{% else %}Save a key under <a href="#providers">AI providers</a> to see the models it can use.{% endif %}</span>
+      </div>
+      <div class="llm-grid">
+        {% for u in llm_uses %}
+        <div class="kcard llm-use {{ 'seat' if u.group == 'committee' }}" data-use="{{ u.key }}" data-connection="{{ u.connection }}">
+          <h3>{{ u.label }} <span class="m" style="font-size:11px; font-weight:400">{{ u.seat or u.key }}</span></h3>
+          <p class="doc">{{ u.what }}</p>
+          <div class="fields" style="grid-template-columns: 1fr">
+            {% if u.fields.enabled %}{{ input(u.fields.enabled) }}{% endif %}
+            {% for x in u.extras %}{{ input(x) }}{% endfor %}
+            {% if u.fields.provider %}
+            <div class="field" data-key="{{ u.fields.provider.key }}">
+              <label for="{{ u.fields.provider.key }}"><span>Provider{{ info(u.fields.provider.help) }}</span></label>
+              <select id="{{ u.fields.provider.key }}" name="{{ u.fields.provider.key }}" class="llm-provider">
+                <option value="auto" {% if u.fields.provider.value in ('auto', '', none) %}selected{% endif %}>auto — first provider with a key{% if auto_provider %} ({{ auto_provider.label }}){% endif %}</option>
+                {% for p in providers %}<option value="{{ p.id }}" {% if p.id == u.fields.provider.value %}selected{% endif %}>{{ p.label }} · {{ 'key saved' if p.has_key else ('no key needed' if p.configured else 'no key') }}</option>{% endfor %}
+                {% if u.fields.provider.value and u.fields.provider.value != 'auto' and u.fields.provider.value not in providers|map(attribute='id')|list %}<option value="{{ u.fields.provider.value }}" selected>{{ u.fields.provider.value }} · removed</option>{% endif %}
+              </select>
+            </div>
+            {% endif %}
+            <div class="field {{ 'changed' if u.fields.model.changed }}" data-key="{{ u.fields.model.key }}">
+              <label for="{{ u.fields.model.key }}"><span>Model{{ info(u.fields.model.help) }}</span><span class="m llm-count" style="font-size:10px"></span></label>
+              <input type="text" id="{{ u.fields.model.key }}" name="{{ u.fields.model.key }}" value="{{ u.fields.model.value or '' }}" class="llm-model" data-provider-field="{{ u.fields.provider.key if u.fields.provider else '' }}" placeholder="pick from the list" autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+          <div class="testbar">
+            <button type="button" class="ghost mini llm-test" data-connection="{{ u.connection }}" title="Ask the provider whether the saved model exists and the key works ({{ u.connection }}){% if u.group == 'committee' %} — tests all three seats{% endif %}">Test</button>
+            <span class="result" data-for="{{ u.connection }}">{% set st = conn_states.get(u.connection) %}{% if st and st.state not in ('unknown', 'off') %}<span class="state {{ st.state }}">{{ st.state|state_label }}</span> <span class="m">{{ st.last_error or st.detail or st.note }}</span>{% elif st and st.state == 'off' %}<span class="m">off — turn it on and save to test</span>{% else %}<span class="m">not tested yet</span>{% endif %}</span>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% for p in providers %}<datalist id="llm-models-{{ p.id }}"></datalist>{% endfor %}
+      <datalist id="llm-models-all"></datalist>
+      <div class="savebar"><button type="submit">Save model choices</button><span class="m">Each seat's <b>Test</b> then sends one real request with what you saved.</span></div>
+    </form>
+  </section>
+
+  <section id="connections">
+    <h2>Connections &amp; API keys <span class="m sub">saved to <code>{{ env_path }}</code>; a saved value overrides the same variable from the shell</span></h2>
+    <form method="post" action="/settings/connections" autocomplete="off">
+      <div class="cards2">
+        {% for g in env_groups %}
+        <div class="kcard" id="{{ g.key }}">
+          <h3>{{ g.label }} <span class="m" style="font-size:11px; font-weight:400">{{ g.configured }}/{{ g.fields|length }} set</span></h3>
+          <p class="doc">{{ g.help }}</p>
+          <div class="fields" style="grid-template-columns: 1fr">
+            {% for f in g.fields %}
+            <div class="field">
+              <label for="env-{{ f.name }}"><span>{{ f.label }}{{ info(f.help) }} <span class="m" style="font-size:10px">{{ f.name }}</span></span>{% if f.set %}<span class="src {{ f.source }}" data-tip="{{ 'Saved in settings.env' if f.source == 'saved' else 'Inherited from the process environment (cannot be cleared here)' }}">{{ f.source }}</span>{% endif %}</label>
+              {% if f.kind == 'select' %}
+                <select id="env-{{ f.name }}" name="{{ f.name }}"><option value="" {% if not f.display %}selected{% endif %}>— not set —</option>{% for c in f.choices %}<option value="{{ c }}" {% if c == f.display %}selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+              {% elif f.secret %}
+                <input type="password" id="env-{{ f.name }}" name="{{ f.name }}" value="" placeholder="{{ f.display if f.set else 'not set' }}" autocomplete="new-password">
+                {% if f.set %}<label style="font-size:11px; justify-content:flex-start"><input type="checkbox" name="{{ f.name }}__clear" value="1" style="width:14px; height:14px"> forget the saved key</label>{% endif %}
+              {% elif f.kind == 'number' %}
+                <input type="number" id="env-{{ f.name }}" name="{{ f.name }}" value="{{ f.display }}" placeholder="{{ f.placeholder or 'not set' }}" step="any">
+              {% else %}
+                <input type="text" id="env-{{ f.name }}" name="{{ f.name }}" value="{{ f.display }}" placeholder="{{ f.placeholder or 'not set' }}">
+              {% endif %}
+              {% if f.name == 'QMAG_DATA' and requested_data != 'auto' %}<div class="hint a">This process was started with <code>--data {{ requested_data }}</code>, which pins the source; the saved choice applies to processes started with the default (auto).</div>{% endif %}
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="savebar">
+        <button type="submit">Save connections</button>
+        <span class="m">Secrets are never shown again after saving — a blank field keeps the saved key. Then check them on the <a href="/status">connection status</a> page with <b>Test connections now</b>.</span>
+      </div>
+    </form>
+  </section>
+
+  <section id="all">
+    <h2>All strategy parameters <span class="m sub">grouped as in the YAML; sections with changes from the defaults are open</span>
+      <input class="search" id="find" type="text" placeholder="Find a parameter… e.g. stop, threshold, max_positions" aria-label="Find a parameter">
+    </h2>
+    <form method="post" action="/settings/strategy" id="allform">
+      {% for s in sections %}
+      <details class="sect" {% if s.changed %}open{% endif %} data-section="{{ s.name }}">
+        <summary>{{ s.label }} <span class="m" style="font-size:11px; font-weight:400">{{ s.name }}</span>{% if s.changed %}<span class="src saved">{{ s.changed }} changed</span>{% endif %}<span class="doc">{{ s.doc }}</span></summary>
+        <div class="body">
+          <div class="fields">
+            {% for f in s.fields if f.kind != 'weights' %}{{ input(f) }}{% endfor %}
+          </div>
+          {% for f in s.fields if f.kind == 'weights' %}
+          <h4 style="margin:14px 0 6px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted)">{{ f.label }} <span class="m" style="text-transform:none; letter-spacing:0; font-weight:400">— {{ f.help }}</span></h4>
+          <div class="fields">
+            {% for name, w in f.value.items() %}
+            <div class="field {{ 'changed' if w != f.default.get(name) }}" data-key="{{ f.key }}.{{ name }}">
+              <label for="{{ f.key }}.{{ name }}"><span>{{ name.replace('_', ' ') }}</span><span class="m" style="font-size:10px">default {{ f.default.get(name) }}</span></label>
+              <input type="number" id="{{ f.key }}.{{ name }}" name="{{ f.key }}.{{ name }}" value="{{ w }}" min="0" step="0.05">
+            </div>
+            {% endfor %}
+          </div>
+          {% endfor %}
+        </div>
+      </details>
+      {% endfor %}
+      <div class="savebar">
+        <button type="submit">Save all parameters</button>
+        <button type="submit" class="danger" form="resetform" onclick="return confirm('Delete settings.yaml and go back to the built-in defaults (or the --config file)?')">Reset strategy to defaults</button>
+        <span class="m">Values are validated before anything is written; an invalid value leaves the saved file untouched.</span>
+      </div>
+    </form>
+    <form method="post" action="/settings/reset" id="resetform"></form>
+  </section>
+
+  <section>
+    <h2>Advanced: strategy as YAML <span class="m sub">the exact content of <code>{{ yaml_path }}</code>; the same format <code>qmag … --config file.yaml</code> reads</span></h2>
+    <form method="post" action="/settings/yaml">
+      <textarea class="code" name="yaml" spellcheck="false">{{ yaml_text }}</textarea>
+      <div class="savebar"><button type="submit">Save YAML</button><span class="m">Unknown keys are ignored with a warning in the log; wrong types or out-of-range values are rejected.</span></div>
+    </form>
+  </section>
+</main>
+{% endblock %}
+
+{% block footer %}
+  state {{ settings.state_dir }} · strategy {{ yaml_path }}{{ '' if yaml_exists else ' (not written yet)' }} · connections {{ env_path }}{{ '' if env_exists else ' (not written yet)' }}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // "Test" on a Language models card: probes the saved choice for that use, so unsaved edits are refused first.
+  (() => {
+    const form = document.querySelector('#models form');
+    const initial = new Map([...form.querySelectorAll('input, select')].map(el => [el, el.type === 'checkbox' ? el.checked : el.value]));
+    const dirty = (card) => [...card.querySelectorAll('input, select')].some(el => (el.type === 'checkbox' ? el.checked : el.value) !== initial.get(el));
+    const label = (st) => ({ok: 'OK', degraded: 'DEGRADED', error: 'ERROR', not_configured: 'NOT CONFIGURED', unknown: 'NOT CHECKED YET', off: 'OFF'}[st] || st.toUpperCase());
+    document.querySelectorAll('.llm-test').forEach(btn => btn.addEventListener('click', async () => {
+      const name = btn.dataset.connection, card = btn.closest('.kcard');
+      const outs = document.querySelectorAll(`.result[data-for="${name}"]`);
+      const show = (html) => outs.forEach(o => o.innerHTML = html);
+      if (dirty(card)) { show('<span class="bad">Save model choices first — the test uses what is saved.</span>'); return; }
+      btn.disabled = true; btn.textContent = 'Testing…'; show('<span class="m">asking the provider…</span>');
+      try {
+        const r = await fetch('/api/status/probe', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({names: [name]}) });
+        if (r.status === 409) { show('<span class="m">a full connection test is running — try again in a moment</span>'); return; }
+        const d = await r.json(), c = d.connections && d.connections[name];
+        if (!c) throw new Error(d.error || 'no result');
+        const esc = (t) => String(t || '').replace(/</g, '&lt;');
+        show(`<span class="state ${c.state}">${label(c.state)}</span> <span class="${c.state === 'ok' ? 'ok' : c.state === 'off' ? 'm' : 'bad'}">${esc(c.state === 'ok' ? c.detail : (c.last_error || c.note || c.detail))}</span>`);
+      } catch (e) { show(`<span class="bad">test failed: ${e.message}</span>`); }
+      finally { btn.disabled = false; btn.textContent = 'Test'; }
+    }));
+  })();
+</script>
+<script>
+  // Find a parameter: filter rows in "All strategy parameters" and open the sections that match.
+  const find = document.getElementById('find');
+  const rows = Array.from(document.querySelectorAll('#allform .field, #allform .toggle'));
+  const sects = Array.from(document.querySelectorAll('#allform details.sect'));
+  const wasOpen = new Map(sects.map(s => [s, s.open]));
+  find.addEventListener('input', () => {
+    const q = find.value.trim().toLowerCase();
+    rows.forEach(r => {
+      const key = (r.dataset.key || (r.querySelector('input[type=checkbox]') || {}).name || '').toLowerCase();
+      const text = r.textContent.toLowerCase();
+      r.style.display = !q || key.includes(q) || text.includes(q) ? '' : 'none';
+    });
+    sects.forEach(s => {
+      const visible = Array.from(s.querySelectorAll('.field, .toggle')).some(r => r.style.display !== 'none');
+      s.style.display = visible ? '' : 'none';
+      s.open = q ? visible : wasOpen.get(s);
+    });
+  });
+  // AI providers: Test asks the provider for its model list with the saved key; the add form fills itself from the vendor preset.
+  (() => {
+    const esc = (t) => String(t || '').replace(/</g, '&lt;');
+    document.querySelectorAll('.prov-test').forEach(btn => btn.addEventListener('click', async () => {
+      const id = btn.dataset.id, out = document.querySelector(`.result[data-for="prov-${id}"]`);
+      const form = btn.closest('form');
+      const edited = [...form.querySelectorAll('input[name=label], input[name=base_url], input[name=api_key]')].some(el => el.name === 'api_key' ? el.value !== '' : el.value !== el.defaultValue);
+      if (edited) { out.innerHTML = '<span class="bad">Save first — the test uses what is saved.</span>'; return; }
+      btn.disabled = true; btn.textContent = 'Testing…'; out.innerHTML = '<span class="m">asking the provider…</span>';
+      try {
+        const d = await (await fetch(`/api/llm/models?provider=${encodeURIComponent(id)}&refresh=1`)).json();
+        const rec = d.providers && d.providers[id];
+        if (!rec) throw new Error(d.error || 'no answer');
+        out.innerHTML = rec.ok ? `<span class="state ok">OK</span> <span class="ok">${rec.models.length} models this key can call</span>` : `<span class="state error">ERROR</span> <span class="bad">${esc(rec.error)}</span>`;
+        if (rec.ok && window.qmagReloadModels) window.qmagReloadModels(false);
+      } catch (e) { out.innerHTML = `<span class="bad">test failed: ${esc(e.message)}</span>`; }
+      finally { btn.disabled = false; btn.textContent = 'Test'; }
+    }));
+    const preset = document.getElementById('add-preset');
+    if (preset) {
+      const label = document.getElementById('add-label'), url = document.getElementById('add-url'), hint = document.getElementById('add-hint'), key = document.getElementById('add-key');
+      const apply = () => {
+        const o = preset.selectedOptions[0]; if (!o) return;
+        label.placeholder = o.dataset.label; url.placeholder = o.dataset.url || 'https://your-server/v1';
+        url.value = o.dataset.url || ''; label.value = '';
+        const local = (o.dataset.url || '').includes('127.0.0.1') || (o.dataset.url || '').includes('localhost');
+        key.placeholder = local ? 'not needed for a local server' : 'paste the key';
+        hint.innerHTML = esc(o.dataset.note) + (o.dataset.keys ? ` Get a key: <a href="${o.dataset.keys}" target="_blank" rel="noopener">${esc(o.dataset.keys.replace('https://', ''))}</a>` : '');
+      };
+      preset.addEventListener('change', apply); apply();
+    }
+  })();
+  // Language models: fill each model field with what the chosen provider's key can call.
+  (function () {
+    const note = document.getElementById('llm-note');
+    const inputs = Array.from(document.querySelectorAll('input.llm-model'));
+    let data = null;
+    function listFor(pid) { return document.getElementById('llm-models-' + pid); }
+    function fill(list, models) {
+      if (!list) return;
+      list.innerHTML = '';
+      models.forEach(m => { const o = document.createElement('option'); o.value = m.id; o.label = m.label && m.label !== m.id ? m.label : ''; list.appendChild(o); });
+    }
+    function wire() {
+      inputs.forEach(inp => {
+        const sel = inp.dataset.providerField ? document.getElementById(inp.dataset.providerField) : null;
+        const p = sel ? sel.value : 'openai';
+        const provider = p === 'auto' ? (data ? data.auto : 'gemini') : p;
+        inp.setAttribute('list', p === 'auto' ? 'llm-models-all' : 'llm-models-' + provider);
+        const rec = data && data.providers[provider];
+        const count = inp.closest('.field').querySelector('.llm-count');
+        if (!rec) { count.textContent = data ? provider + ': unknown provider' : ''; count.classList.toggle('a', !!data); return; }
+        if (rec.ok) {
+          const known = rec.models.some(m => m.id === inp.value);
+          count.textContent = rec.models.length + ' models available' + (inp.value && !known ? ' · "' + inp.value + '" not in the list' : '') + (!inp.value ? (rec.default ? ' · blank = ' + rec.default : ' · choose one') : '');
+          count.classList.toggle('a', (!!inp.value && !known) || (!inp.value && !rec.default));
+        } else {
+          count.textContent = (rec.label || provider) + ': ' + rec.error;
+          count.classList.add('a');
+        }
+      });
+    }
+    function load(refresh) {
+      note.textContent = 'Loading the live model lists…';
+      fetch('/api/llm/models' + (refresh ? '?refresh=1' : '')).then(r => r.json()).then(d => {
+        data = d;
+        const all = [], parts = [];
+        Object.keys(d.providers).forEach(pid => {
+          const rec = d.providers[pid];
+          fill(listFor(pid), rec.ok ? rec.models : []);
+          if (rec.ok) all.push(...rec.models);
+          parts.push((rec.label || pid) + ': ' + (rec.ok ? rec.models.length + ' models' : rec.error));
+        });
+        fill(listFor('all'), all);
+        note.textContent = parts.join(' · ') + (all.length ? ' — click into a model field to pick one.' : '');
+        wire();
+      }).catch(err => { note.textContent = 'Model lists unavailable: ' + err; });
+    }
+    window.qmagReloadModels = load;
+    document.querySelectorAll('select.llm-provider').forEach(s => s.addEventListener('change', wire));
+    inputs.forEach(i => i.addEventListener('input', wire));
+    document.getElementById('llm-refresh').addEventListener('click', () => load(true));
+    if (inputs.length) load(false);
+  })();
+  // Warn before leaving with unsaved edits.
+  let dirty = false;
+  document.querySelectorAll('form').forEach(f => f.addEventListener('input', () => { dirty = true; }));
+  document.querySelectorAll('form').forEach(f => f.addEventListener('submit', () => { dirty = false; }));
+  window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+</script>
+{% endblock %}

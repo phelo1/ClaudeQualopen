@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% set active = 'accounts' %}
+{% import "_macros.html" as m %}
+
+{% block title %}Accounts · ClaudeQual{% endblock %}
+
+{% block head %}
+<style>
+  .desk { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .desk .head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .desk .head b { font-size: 18px; }
+  .desk .head .path { color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .desk .stats { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+  .desk .stat { background: var(--panel); }
+  .state.stale, .state.no_snapshot { color: var(--amber); border-color: rgba(245,158,11,.5); background: rgba(245,158,11,.08); }
+  .state.missing { color: var(--red); border-color: rgba(239,68,68,.5); }
+  .state.running { color: var(--green); border-color: rgba(34,197,94,.4); }
+  .state.stopped { color: var(--red); border-color: rgba(239,68,68,.5); }
+  .totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .totals .stat .v { font-size: 22px; }
+  .cur { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 4px; }
+  .howto { font-size: 13px; line-height: 1.55; color: var(--muted); }
+  .howto code { background: var(--panel-2); padding: 1px 6px; border-radius: 4px; color: var(--text); font-size: 12px; }
+  .howto ol { margin: 6px 0 0; padding-left: 20px; } .howto li { margin: 3px 0; }
+  .ctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-left: auto; }
+  .ctl button { padding: 6px 11px; font-size: 12px; }
+  .note { color: var(--muted); font-size: 12px; }
+</style>
+{% endblock %}
+
+{% block header_pills %}
+  <span class="pill">{{ overview.desks|length }} account{{ 's' if overview.desks|length != 1 else '' }}</span>
+{% endblock %}
+
+{% block header_actions %}
+  <button id="refresh" {% if run.running %}disabled{% endif %}>{{ 'Reading the broker…' if run.running else 'Refresh this desk from the broker' }}</button>
+  <a class="btn ghost" href="/settings#desks">Add desks</a>
+{% endblock %}
+
+{% block content %}
+<main>
+  <section>
+    <h2>Accounts <span class="m sub">every account a qmag desk drives — what the broker says it holds, marked at the latest real bar</span></h2>
+    {% if overview.totals %}
+    {% for t in overview.totals %}
+    <div class="totals" style="{{ 'margin-top:12px' if not loop.first else '' }}">
+      <div class="stat"><div class="k">Equity{{ m.info("Sum of the broker-reported net liquidation value of every " ~ t.currency ~ " account with a usable snapshot (" ~ t.desks|join(', ') ~ "). Accounts in other currencies are summed separately: no exchange rate is invented.") }}</div><div class="v">{{ '{:,.0f}'.format(t.equity) if t.equity is not none else '–' }}<span class="cur">{{ t.currency }}</span></div></div>
+      <div class="stat"><div class="k">Cash</div><div class="v">{{ '{:,.0f}'.format(t.cash) if t.cash is not none else '–' }}<span class="cur">{{ t.currency }}</span></div></div>
+      <div class="stat"><div class="k">Stocks at market{{ m.info("Market value of every holding at its latest real close. Holdings without a fresh bar are left out and flagged below.") }}</div><div class="v">{{ '{:,.0f}'.format(t.market_value) if t.market_value is not none else '–' }}<span class="cur">{{ t.currency }}</span></div></div>
+      <div class="stat"><div class="k">Open P&amp;L{{ m.info("Unrealised profit or loss across the holdings that have a mark.") }}</div><div class="v {{ 'g' if (t.unrealized or 0) > 0 else 'r' if (t.unrealized or 0) < 0 else '' }}">{{ '{:+,.0f}'.format(t.unrealized) if t.unrealized is not none else '–' }}{% if not t.unrealized_known %} <span class="a" style="font-size:12px" title="some holdings have no fresh bar">partial</span>{% endif %}</div></div>
+      <div class="stat"><div class="k">Today{{ m.info("Equity change since each desk's first pass of the session (the daily loss circuit-breaker measures the same number). Blank until a desk has cycled today.") }}</div><div class="v {{ 'g' if (t.day_pnl or 0) > 0 else 'r' if (t.day_pnl or 0) < 0 else '' }}">{{ '{:+,.0f}'.format(t.day_pnl) if t.day_pnl is not none else '–' }}{% if t.day_pnl is not none and not t.day_pnl_known %} <span class="a" style="font-size:12px">partial</span>{% endif %}</div></div>
+      <div class="stat"><div class="k">Realised today</div><div class="v {{ 'g' if (t.realized_today or 0) > 0 else 'r' if (t.realized_today or 0) < 0 else '' }}">{{ '{:+,.0f}'.format(t.realized_today) if t.realized_today is not none else '–' }}</div></div>
+      <div class="stat"><div class="k">Realised total{{ m.info("Closed-trade P&L from every desk's journal, after modelled slippage and commission.") }}</div><div class="v {{ 'g' if (t.realized_total or 0) > 0 else 'r' if (t.realized_total or 0) < 0 else '' }}">{{ '{:+,.0f}'.format(t.realized_total) if t.realized_total is not none else '–' }}</div></div>
+      <div class="stat"><div class="k">Positions / orders</div><div class="v">{{ t.positions }} / {{ t.open_orders }}</div></div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="empty">No account has a usable snapshot yet. A desk writes <code>account.json</code> after every cycle; press <b>Refresh this desk from the broker</b> to read this one now.</div>
+    {% endif %}
+    {% if overview.problems %}
+    <div class="gaps" style="margin-top:12px"><b>Not included in the totals</b><ul>{% for p in overview.problems %}<li>{{ p }}</li>{% endfor %}</ul></div>
+    {% endif %}
+    <p class="note" style="margin:12px 0 0">Each desk sizes, sends and protects its own orders on its own account - nothing is mirrored between accounts. The figures here come from each desk's last snapshot ({{ 'refreshed ' ~ (run.finished_at|ago) if run.finished_at else 'this desk refreshes after every cycle' }}){% if run.error %} <span class="r">— last refresh: {{ run.error }}</span>{% endif %}.</p>
+  </section>
+
+  {% for d in overview.desks %}
+  {% set s = d.snapshot %}
+  <section id="desk-{{ d.name }}">
+    <div class="desk">
+      <div class="head">
+        <b>{{ d.name }}</b>
+        {% if s %}<span class="pill {{ 'live' if s.live else '' }}">{{ 'LIVE · ' if s.live else '' }}{{ s.broker_name or s.broker }}</span>{% elif d.daemon.broker %}<span class="pill {{ 'live' if d.daemon.live else '' }}">{{ d.daemon.broker }}</span>{% endif %}
+        {% if d.local %}<span class="tag" title="the desk this dashboard belongs to">this desk</span>{% endif %}
+        <span class="state {{ d.state }}" title="{{ d.problem or 'snapshot ' ~ (s.asof|ago) }}">{{ {'ok': 'OK', 'stale': 'STALE', 'no_snapshot': 'NO SNAPSHOT', 'error': 'BROKER ERROR', 'missing': 'MISSING'}[d.state] }}</span>
+        <span class="state {{ 'running' if d.daemon.running else 'stopped' }}" title="daemon heartbeat {{ d.daemon.heartbeat|ago }}{% if d.daemon.task %} · running {{ d.daemon.task }}{% endif %}">daemon {{ 'running' if d.daemon.running else 'not heard from' }}</span>
+        {% if d.halt %}<span class="pill off" title="{{ d.halt.reason }} — by {{ d.halt.by }} {{ d.halt.at|ago }}"><i class="dot"></i>HALTED</span>{% endif %}
+        <span class="path">{{ d.state_dir }}</span>
+        <span class="ctl">
+          {% if d.url %}<a class="btn ghost" href="{{ d.url }}" target="_blank" rel="noopener">its dashboard ↗</a>{% endif %}
+          {% if d.local %}<a class="btn ghost" href="/status#halt">kill switch</a>
+          {% elif d.exists %}{% if d.halt %}<button class="ghost halt-btn" data-desk="{{ d.name }}" data-on="0">Resume {{ d.name }}</button>{% else %}<button class="danger halt-btn" data-desk="{{ d.name }}" data-on="1">Halt {{ d.name }}</button>{% endif %}{% endif %}
+        </span>
+      </div>
+      {% if s and s.equity is not none %}
+      <div class="stats">
+        <div class="stat"><div class="k">Equity</div><div class="v">{{ '{:,.0f}'.format(s.equity) }}<span class="cur">{{ s.currency }}</span></div></div>
+        <div class="stat"><div class="k">Cash</div><div class="v">{{ '{:,.0f}'.format(s.cash) }}<span class="cur">{{ s.currency }}</span></div></div>
+        <div class="stat"><div class="k">Stocks at market</div><div class="v">{{ '{:,.0f}'.format(s.market_value) if s.market_value is not none else '–' }}</div></div>
+        <div class="stat"><div class="k">Open P&amp;L</div><div class="v {{ 'g' if (s.unrealized or 0) > 0 else 'r' if (s.unrealized or 0) < 0 else '' }}">{{ '{:+,.0f}'.format(s.unrealized) if s.unrealized is not none else '–' }}{% if not s.unrealized_known %} <span class="a" style="font-size:12px">partial</span>{% endif %}</div></div>
+        <div class="stat"><div class="k">Today</div><div class="v {{ 'g' if (s.day_pnl or 0) > 0 else 'r' if (s.day_pnl or 0) < 0 else '' }}">{{ '{:+,.0f}'.format(s.day_pnl) if s.day_pnl is not none else '–' }}</div></div>
+        <div class="stat"><div class="k">Realised today</div><div class="v {{ 'g' if (s.realized_today or 0) > 0 else 'r' if (s.realized_today or 0) < 0 else '' }}">{{ '{:+,.0f}'.format(s.realized_today) }}</div></div>
+        <div class="stat"><div class="k">Realised total</div><div class="v {{ 'g' if (s.realized_total or 0) > 0 else 'r' if (s.realized_total or 0) < 0 else '' }}">{{ '{:+,.0f}'.format(s.realized_total) }} <span class="m" style="font-size:12px">{{ s.trades }} trade{{ 's' if s.trades != 1 else '' }}</span></div></div>
+        <div class="stat"><div class="k">Orders / pending / armed</div><div class="v sm">{{ s.open_orders }} / {{ s.pending_entries }} / {{ s.arming }}</div></div>
+        <div class="stat"><div class="k">Snapshot</div><div class="v sm {{ 'a' if d.stale else '' }}">{{ s.asof|ago }}</div><div class="note">marks {{ s.marks_asof or '–' }} · {{ s.marks_source }}</div></div>
+      </div>
+      {% if s.positions %}
+      <div class="table-wrap" style="margin-top:12px"><table>
+        <tr><th>Symbol</th><th class="num">Qty</th><th class="num">Avg cost</th><th class="num">Last</th><th class="num">Market value</th><th class="num">P&amp;L</th><th class="num">Stop</th><th class="num">Target</th><th>Setup</th><th>Opened</th><th>Orders</th><th>Note</th></tr>
+        {% for p in s.positions %}
+        <tr class="{{ 'dim' if not p.at_broker else '' }}">
+          <td><b>{% if d.local %}<a href="/symbol/{{ p.symbol }}">{{ p.symbol }}</a>{% else %}{{ p.symbol }}{% endif %}</b></td>
+          <td class="num">{{ p.qty }}</td>
+          <td class="num">{{ '%.2f'|format(p.avg_cost) }}</td>
+          <td class="num" title="{{ p.mark_asof or 'no fresh bar' }}">{{ '%.2f'|format(p.last) if p.last is not none else '–' }}</td>
+          <td class="num">{{ '{:,.0f}'.format(p.market_value) if p.market_value is not none else '–' }}</td>
+          <td class="num {{ 'g' if (p.unrealized or 0) > 0 else 'r' if (p.unrealized or 0) < 0 else '' }}">{% if p.unrealized is not none %}{{ '{:+,.0f}'.format(p.unrealized) }} <span class="m" style="font-size:11px">{{ '%+.1f%%'|format(p.unrealized_pct * 100) }}</span>{% else %}–{% endif %}</td>
+          <td class="num {{ 'g' if p.stop is not none and p.stop >= p.avg_cost else 'r' if p.stop is not none else '' }}">{{ '%.2f'|format(p.stop) if p.stop is not none else '–' }}</td>
+          <td class="num b">{{ '%.2f'|format(p.target) if p.target else '–' }}</td>
+          <td class="m">{{ p.setup.replace('_', ' ') if p.setup else '–' }}</td>
+          <td>{{ p.entry_date or '–' }}</td>
+          <td class="num">{{ p.orders }}</td>
+          <td class="detail">{{ p.note or ('managed by qmag' if p.managed else '') }}</td>
+        </tr>
+        {% endfor %}
+      </table></div>
+      {% else %}
+      <div class="empty" style="margin-top:12px">No holdings at the broker.</div>
+      {% endif %}
+      {% if s.data_gaps %}<div class="gaps" style="margin-top:10px"><b>Data gaps</b><ul>{% for g in s.data_gaps %}<li>{{ g }}</li>{% endfor %}</ul></div>{% endif %}
+      {% elif s and s.error %}
+      <div class="gaps"><b>Broker not readable when the snapshot was taken ({{ s.asof|ago }})</b><ul><li>{{ s.error }}</li><li>Equity, cash and holdings are left empty rather than carried over from an older read.</li></ul></div>
+      {% else %}
+      <div class="empty">{{ d.problem }}</div>
+      {% endif %}
+    </div>
+  </section>
+  {% endfor %}
+
+  <section>
+    <h2>Adding an account</h2>
+    <div class="howto">
+      <p>Every account gets its own <b>desk</b>: a state directory with its own journal, settings (broker credentials, risk budget) and daemon. That keeps sizing, the kill switch, the daily loss limit and the trade journal per account, and means a fill on one account is never assumed on another.</p>
+      <ol>
+        <li>On the server: <code>bash deploy/add-desk.sh NAME --broker alpaca --port 8856</code> (brokers: paper, alpaca, ibkr, mt5; a second IBKR account needs its own gateway on other ports). This creates <code>desks/NAME</code>, its <code>qmag-daemon-NAME</code> / <code>qmag-dashboard-NAME</code> services and adds it to this desk's <code>{{ desks_env }}</code>.</li>
+        <li>Put that account's keys in the new desk's settings page (its own dashboard port) or its <code>settings.env</code>.</li>
+        <li>Anywhere else: run <code>qmag daemon --broker … --state-dir /path</code> and list <code>NAME=/path</code> in <b>Other desks to show</b> on the <a href="/settings#desks">settings page</a>.</li>
+      </ol>
+      <p style="margin-top:8px">A desk you only want to watch, not trade from: create it, then throw its kill switch — its holdings and P&amp;L still show here.</p>
+    </div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const btn = document.getElementById('refresh');
+  if (btn) btn.addEventListener('click', async () => {
+    btn.disabled = true; btn.textContent = 'Reading the broker…';
+    const r = await fetch('/api/accounts/refresh', { method: 'POST' });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); btn.textContent = j.reason || 'busy'; setTimeout(() => location.reload(), 2000); return; }
+    const poll = setInterval(async () => {
+      const s = await (await fetch('/api/accounts')).json();
+      if (!s.run.running) { clearInterval(poll); location.reload(); }
+    }, 1500);
+  });
+  document.querySelectorAll('.halt-btn').forEach(b => b.addEventListener('click', async () => {
+    const on = b.dataset.on === '1', desk = b.dataset.desk;
+    let reason = '';
+    if (on) { reason = prompt(`Halt ${desk}: stop every new entry on that account (open positions keep their stops). Reason:`); if (reason === null) return; }
+    else if (!confirm(`Resume trading on ${desk}?`)) return;
+    b.disabled = true;
+    const r = await fetch(`/api/accounts/${encodeURIComponent(desk)}/halt`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on, reason }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(j.detail || 'failed'); b.disabled = false; return; }
+    location.reload();
+  }));
+</script>
+{% endblock %}

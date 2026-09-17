@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% set active = 'advisor' %}
+{% set llm = conn.connections|selectattr('name', 'equalto', 'llm_advisor')|first if conn and conn.connections else none %}
+
+{% block title %}Advisor · ClaudeQual{% endblock %}
+
+{% block head %}
+<style>
+  .chat { display: grid; gap: 14px; }
+  .msg { display: grid; gap: 8px; max-width: 900px; }
+  .msg .who { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); display: flex; gap: 8px; align-items: baseline; }
+  .msg .who time { text-transform: none; letter-spacing: 0; }
+  .msg .body { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; }
+  .msg.you .body { border-left: 3px solid var(--blue); }
+  .msg.advisor .body { border-left: 3px solid var(--violet); }
+  .msg.error .body { border-left: 3px solid var(--red); color: var(--red); }
+  .proposal { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); align-items: start; }
+  .proposal.applied { border-color: rgba(34,197,94,.4); } .proposal.rejected, .proposal.dismissed { opacity: .6; }
+  .proposal .key { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; font-weight: 600; }
+  .proposal .vals { font-variant-numeric: tabular-nums; font-size: 13px; }
+  .proposal .vals b { color: var(--text); } .proposal .vals s { color: var(--muted); }
+  .proposal .why { grid-column: 2; font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+  .proposal .status { grid-column: 2; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .proposal.applied .status { color: var(--green); } .proposal.rejected .status { color: var(--red); } .proposal.dismissed .status { color: var(--muted); }
+  .proposal input[type=checkbox] { width: 16px; height: 16px; margin-top: 3px; }
+  .questions { border: 1px dashed var(--amber); border-radius: 10px; padding: 8px 12px; font-size: 13px; color: var(--amber); }
+  .questions ul { margin: 4px 0 0 18px; padding: 0; }
+  .risk-note { font-size: 12.5px; color: var(--muted); }
+  form.ask textarea { width: 100%; min-height: 84px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font: inherit; font-size: 14px; line-height: 1.5; resize: vertical; }
+  form.ask textarea:focus { outline: none; border-color: var(--blue); }
+  .examples { display: flex; flex-wrap: wrap; gap: 6px; }
+  .examples button { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); font-weight: 500; font-size: 12px; padding: 5px 10px; border-radius: 999px; }
+  .examples button:hover { color: var(--text); border-color: var(--blue); }
+  .sees dt { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-top: 8px; }
+  .sees dd { margin: 2px 0 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .pendingbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  .g { color: var(--green); } .r { color: var(--red); }
+</style>
+{% endblock %}
+
+{% block header_pills %}
+  {% if llm %}<span class="state {{ llm.state }}" title="{{ llm.note }}">advisor · {{ llm.state|state_label }}</span>{% endif %}
+  <span class="pill" title="Every strategy parameter the advisor can propose to change">{{ settings_count }} settings in its map</span>
+{% endblock %}
+
+{% block header_actions %}
+  {% if transcript.exchanges %}<button id="clear" class="ghost" title="Forget the conversation (applied changes stay in the settings)">Clear conversation</button>{% endif %}
+{% endblock %}
+
+{% block content %}
+<main>
+  {% if not enabled %}
+  <div class="flash err">The advisor is switched off (<code>advisor.enabled</code>). <span class="what">Turn it on under <a href="/settings#models">settings → Language models</a>.</span></div>
+  {% elif not available %}
+  <div class="flash err">No model key for the advisor <span class="what">— {{ availability_note }}. Save a Gemini or OpenAI key under <a href="/settings#models">settings → Language models</a>; the conversation below still works for reading.</span></div>
+  {% endif %}
+
+  <section class="col-8">
+    <h2>Desk advisor <span class="m sub">say what you want in plain English; accept the changes you agree with</span></h2>
+    <p class="m" style="margin:0 0 14px; font-size:13px; line-height:1.55">
+      The advisor reads your message together with the desk's state (equity, positions, recent R, regime, kill switch, lessons) and a map of all <b>{{ settings_count }}</b> strategy settings — each with its meaning, current value, default and allowed range.
+      It answers with advice and, when you asked for a change, a list of exact setting changes. <b>Nothing changes until you press Apply</b>: every proposal is validated the same way as the settings page, and API keys, the broker and the live switch are out of its reach.
+    </p>
+
+    <div class="chat" id="chat">
+      {% for ex in transcript.exchanges %}
+      <div class="msg you"><div class="who">You <time>{{ ex.at|ago }}</time></div><div class="body">{{ ex.message }}</div></div>
+      {% if ex.error %}
+      <div class="msg error"><div class="who">Advisor · {{ ex.provider }} / {{ ex.model }}</div><div class="body">The model did not answer — {{ ex.error }}</div></div>
+      {% else %}
+      <div class="msg advisor">
+        <div class="who">Advisor <span class="m" style="text-transform:none; letter-spacing:0">{{ ex.provider }} / {{ ex.model }}</span></div>
+        <div class="body">{{ ex.reply }}</div>
+        {% if ex.changes %}
+        <div style="display:grid; gap:8px">
+          {% for c in ex.changes %}
+          <label class="proposal {{ c.status }}" data-id="{{ c.id }}">
+            {% if c.status == 'proposed' %}<input type="checkbox" class="pick" value="{{ c.id }}" checked>{% else %}<span></span>{% endif %}
+            <div>
+              <div class="key">{{ c.key }}</div>
+              <div class="vals">{% if c.valid %}<s>{{ c.current if c.current is not none else 'blank' }}</s> → <b>{{ c.value if c.value is not none else 'blank' }}</b>{% else %}proposed <b>{{ c.proposed }}</b>{% endif %}</div>
+            </div>
+            <div class="why">{{ c.why }}</div>
+            <div class="status">{% if c.status == 'applied' %}applied {{ c.applied_at|ago }}{% elif c.status == 'rejected' %}not applicable — {{ c.problem }}{% elif c.status == 'no_change' %}already set to this{% elif c.status == 'dismissed' %}dismissed{% else %}awaiting your decision{% endif %}</div>
+          </label>
+          {% endfor %}
+        </div>
+        {% if ex.risk_note %}<div class="risk-note">Risk: {{ ex.risk_note }}</div>{% endif %}
+        {% endif %}
+        {% if ex.questions %}<div class="questions">To confirm or clarify:<ul>{% for q in ex.questions %}<li>{{ q }}</li>{% endfor %}</ul></div>{% endif %}
+      </div>
+      {% endif %}
+      {% endfor %}
+      {% if not transcript.exchanges %}
+      <div class="empty">No conversation yet. Describe the risk you want to take, ask what a setting does, or ask for a review of the current setup. Try one of the examples below.</div>
+      {% endif %}
+    </div>
+
+    <form class="ask" id="ask" style="margin-top:16px">
+      <textarea id="message" name="message" placeholder="e.g. I want to risk half as much per trade until I have twenty closed trades" maxlength="4000" {% if busy %}disabled{% endif %}></textarea>
+      <div class="savebar" style="margin-top:8px">
+        <button type="submit" id="send" {% if busy or not available or not enabled %}disabled{% endif %}>{{ 'Thinking…' if busy else 'Ask the advisor' }}</button>
+        <span class="m" id="ask-note">{% if busy %}The advisor is answering the previous message.{% else %}Ctrl+Enter sends. One model call per message.{% endif %}</span>
+      </div>
+      <div class="examples" style="margin-top:10px">{% for e in examples %}<button type="button" class="example">{{ e }}</button>{% endfor %}</div>
+    </form>
+  </section>
+
+  <section class="col-4">
+    <h2>Proposed changes <span class="count" id="pending-count">{{ pending|length }}</span> <span class="m sub">awaiting your decision</span></h2>
+    <div id="pending-list" style="display:grid; gap:8px">
+      {% for c in pending %}
+      <label class="proposal" data-id="{{ c.id }}">
+        <input type="checkbox" class="pick-side" value="{{ c.id }}" checked>
+        <div><div class="key">{{ c.key }}</div><div class="vals"><s>{{ c.current if c.current is not none else 'blank' }}</s> → <b>{{ c.value if c.value is not none else 'blank' }}</b></div></div>
+        <div class="why">{{ c.why }}</div>
+      </label>
+      {% endfor %}
+      {% if not pending %}<div class="empty" id="pending-empty">Nothing waiting. Proposals appear here after the advisor answers.</div>{% endif %}
+    </div>
+    <div class="pendingbar">
+      <button id="apply" {% if not pending %}disabled{% endif %}>Apply selected</button>
+      <button id="dismiss" class="ghost" {% if not pending %}disabled{% endif %}>Dismiss selected</button>
+      <span class="m" id="apply-note">Writes <code>settings.yaml</code>; this dashboard uses it at once, a running daemon from its next cycle.</span>
+    </div>
+
+    <h2 style="margin-top:22px">What the advisor sees <span class="m sub">nothing else</span></h2>
+    <dl class="sees" style="margin:0">
+      <dt>Desk</dt><dd>{{ desk.desk.broker }}{% if desk.desk.live %} <span class="a">LIVE</span>{% endif %} · data {{ desk.desk.data_source }} · {{ desk.desk.config_source }}</dd>
+      <dt>Account</dt><dd>{% if desk.account.equity is defined and desk.account.equity is not none %}equity {{ '{:,.0f}'.format(desk.account.equity) }} {{ desk.account.currency }} · cash {{ '{:,.0f}'.format(desk.account.cash or 0) }} · {{ desk.account.open_positions }} open{% else %}{{ desk.account.note or desk.account.error or 'no snapshot' }}{% endif %}</dd>
+      <dt>Recent trades</dt><dd>{% if desk.recent_r_multiples.n %}{{ desk.recent_r_multiples.n }} closed · avg {{ '%+.2f'|format(desk.recent_r_multiples.avg_r) }}R · win rate {{ '%.0f%%'|format(desk.recent_r_multiples.win_rate * 100) }}{% else %}no closed trades yet{% endif %} ({{ desk.closed_trades_total }} total)</dd>
+      <dt>Market</dt><dd>{{ desk.last_cycle.regime_note or desk.last_cycle.note or 'no cycle yet' }}</dd>
+      <dt>Kill switch</dt><dd>{% if desk.kill_switch.on %}<span class="r">HALTED</span> — {{ desk.kill_switch.reason }}{% else %}off{% endif %}</dd>
+      <dt>Learned adjustments</dt><dd>{% if desk.learned_adjustments %}{% for k, v in desk.learned_adjustments.items() %}<code>{{ k }}={{ v }}</code>{{ ' ' }}{% endfor %}{% else %}none{% endif %}</dd>
+      <dt>Pinned by the command line</dt><dd>{% if desk.cli_overrides %}{% for k, v in desk.cli_overrides.items() %}<code>{{ k }}={{ v }}</code>{{ ' ' }}{% endfor %}{% else %}nothing{% endif %}</dd>
+      <dt>Model</dt><dd>{{ availability_note }} · <a href="/settings#models">change</a></dd>
+    </dl>
+    <p class="m" style="font-size:12px; margin:14px 0 0; line-height:1.5">The model is a reasoning aid, not a risk manager: it can be wrong, and it only knows what is listed here. Read every proposal before applying it. Applied changes are recorded on the <a href="/status">status</a> page and can be undone on the <a href="/settings">settings</a> page.</p>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const form = document.getElementById('ask'), ta = document.getElementById('message'), send = document.getElementById('send'), note = document.getElementById('ask-note');
+  document.querySelectorAll('.example').forEach(b => b.addEventListener('click', () => { ta.value = b.textContent; ta.focus(); }));
+  ta.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { form.requestSubmit(); } });
+  async function post(url, body) {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || data.error || ('HTTP ' + r.status));
+    return data;
+  }
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const message = ta.value.trim();
+    if (!message) return;
+    send.disabled = true; ta.disabled = true; send.textContent = 'Thinking…'; note.textContent = 'Sending the desk state and the settings map to the model…';
+    try {
+      await post('/api/advisor/ask', { message });
+      location.reload();
+    } catch (err) {
+      note.textContent = 'Failed: ' + err.message; send.disabled = false; ta.disabled = false; send.textContent = 'Ask the advisor';
+    }
+  });
+  function picked() {
+    const side = Array.from(document.querySelectorAll('.pick-side:checked')).map(i => i.value);
+    return side;
+  }
+  // keep the chat checkboxes and the side list in sync
+  document.querySelectorAll('.pick').forEach(cb => cb.addEventListener('change', () => { const s = document.querySelector('.pick-side[value="' + cb.value + '"]'); if (s) s.checked = cb.checked; }));
+  document.querySelectorAll('.pick-side').forEach(cb => cb.addEventListener('change', () => { const s = document.querySelector('.pick[value="' + cb.value + '"]'); if (s) s.checked = cb.checked; }));
+  const applyBtn = document.getElementById('apply'), dismissBtn = document.getElementById('dismiss'), applyNote = document.getElementById('apply-note');
+  if (applyBtn) applyBtn.addEventListener('click', async () => {
+    const ids = picked();
+    if (!ids.length) { applyNote.textContent = 'Tick at least one change.'; return; }
+    applyBtn.disabled = true; applyNote.textContent = 'Validating and writing settings.yaml…';
+    try {
+      const r = await post('/api/advisor/apply', { ids });
+      applyNote.textContent = r.applied.length + ' applied' + (r.skipped.length ? ', ' + r.skipped.length + ' skipped' : '');
+      location.reload();
+    } catch (err) { applyNote.textContent = 'Failed: ' + err.message; applyBtn.disabled = false; }
+  });
+  if (dismissBtn) dismissBtn.addEventListener('click', async () => {
+    const ids = picked();
+    if (!ids.length) return;
+    try { await post('/api/advisor/dismiss', { ids }); location.reload(); } catch (err) { applyNote.textContent = 'Failed: ' + err.message; }
+  });
+  const clearBtn = document.getElementById('clear');
+  if (clearBtn) clearBtn.addEventListener('click', async () => { if (!confirm('Forget the whole conversation? Applied changes stay in the settings.')) return; await post('/api/advisor/clear'); location.reload(); });
+  const chat = document.getElementById('chat'); if (chat && chat.lastElementChild) chat.lastElementChild.scrollIntoView({ block: 'nearest' });
+</script>
+{% endblock %}

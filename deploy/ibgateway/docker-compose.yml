@@ -1,0 +1,45 @@
+# IB Gateway, headless, for qmag. Uses the community image that bundles
+# IB Gateway + IBC (automated login / restarts) + Xvfb; it has native
+# linux/arm64 and linux/amd64 builds, so it runs on Oracle Ampere VMs.
+#
+#   cp .env.example .env && chmod 600 .env   # fill in TWS_USERID
+#   printf '%s' 'the-password' > tws_password && chmod 600 tws_password
+#   docker compose up -d && docker compose logs -f
+#
+# The TWS API is published on the HOST at 127.0.0.1:4002 (paper) / 4001
+# (live). Nothing is exposed beyond loopback. qmag connects with
+# IBKR_HOST=127.0.0.1 IBKR_PORT=4002 and --broker ibkr.
+name: qmag-ibkr
+services:
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    restart: unless-stopped
+    environment:
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD: ${TWS_PASSWORD:-}
+      # Password from a file (./tws_password, mode 0600) so quoting never matters.
+      TWS_PASSWORD_FILE: /run/secrets/tws_password
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      READ_ONLY_API: ${READ_ONLY_API:-no}
+      TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-restart}
+      RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT:-yes}
+      TWOFA_EXIT_INTERVAL: ${TWOFA_EXIT_INTERVAL:-180}
+      AUTO_RESTART_TIME: ${AUTO_RESTART_TIME:-11:45 PM}
+      EXISTING_SESSION_DETECTED_ACTION: ${EXISTING_SESSION_DETECTED_ACTION:-primary}
+      BYPASS_WARNING: ${BYPASS_WARNING:-yes}
+      TIME_ZONE: ${TIME_ZONE:-America/New_York}
+      TZ: ${TIME_ZONE:-America/New_York}
+      JAVA_HEAP_SIZE: ${JAVA_HEAP_SIZE:-768}
+      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}
+      TWS_SETTINGS_PATH: /home/ibgateway/tws_settings
+    volumes:
+      - tws_settings:/home/ibgateway/tws_settings
+      - ./tws_password:/run/secrets/tws_password:ro
+    ports:
+      - "127.0.0.1:4001:4003"
+      - "127.0.0.1:4002:4004"
+      - "127.0.0.1:5900:5900"
+    mem_limit: 1536m
+
+volumes:
+  tws_settings:

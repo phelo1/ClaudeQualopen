@@ -1,0 +1,251 @@
+{% extends "base.html" %}
+{% set active = 'status' %}
+
+{% from "_macros.html" import info %}
+
+{% block title %}Connections · ClaudeQual{% endblock %}
+
+{% block header_pills %}
+  <span class="pill">{{ conn.data_source }} · {{ conn.broker }}</span>
+{% endblock %}
+
+{% block header_actions %}
+  <button id="probe" {% if probe.running %}disabled{% endif %}>{{ 'Testing connections…' if probe.running else 'Test connections now' }}</button>
+{% endblock %}
+
+{% block content %}
+<main>
+  <section>
+    <h2>Connections <span class="m sub">every source of data and every service the desk relies on — what is on, what is configured, what is actually answering</span></h2>
+    <div class="overall">
+      <span class="big {{ conn.overall }}">{{ {'ok': 'ALL SYSTEMS OK', 'degraded': 'DEGRADED', 'error': 'REQUIRED CONNECTION DOWN', 'unknown': 'NOT CHECKED YET'}[conn.overall] }}</span>
+      <div class="stats" style="flex: 1; min-width: 320px">
+        <div class="stat"><div class="k">OK</div><div class="v g">{{ conn.counts.ok }}</div></div>
+        <div class="stat"><div class="k">Degraded</div><div class="v {{ 'a' if conn.counts.degraded else '' }}">{{ conn.counts.degraded }}</div></div>
+        <div class="stat"><div class="k">Error</div><div class="v {{ 'r' if conn.counts.error else '' }}">{{ conn.counts.error }}</div></div>
+        <div class="stat"><div class="k">Not configured</div><div class="v {{ 'r' if conn.counts.not_configured else '' }}">{{ conn.counts.not_configured }}</div></div>
+        <div class="stat"><div class="k">Not checked yet</div><div class="v m">{{ conn.counts.unknown }}</div></div>
+        <div class="stat"><div class="k">Off</div><div class="v m">{{ conn.counts.off }}</div></div>
+      </div>
+    </div>
+    <p class="m" style="margin:12px 0 0">
+      qmag never fills a missing input with an assumption. When a source below is not answering, the readings it feeds stay empty, the gap is written into the report and into every plan built from it, and any check that needs that data fails.
+      Status is refreshed as the daemon, the CLI and this dashboard use each connection; <b>Test connections now</b> exercises every enabled one immediately (paid sources are only called when they are enabled).
+      {% if probe.finished_at %}Last test {{ probe.finished_at|ago }}.{% endif %}{% if probe.error %} <span class="r">Last test failed: {{ probe.error }}</span>{% endif %}
+    </p>
+    <div class="legend" style="margin-top:10px">
+      <span class="state ok">OK</span> answered on the last attempt ·
+      <span class="state degraded">DEGRADED</span> partly working (some symbols / endpoints failed, or stale) ·
+      <span class="state error">ERROR</span> last attempt failed ·
+      <span class="state not_configured">NOT CONFIGURED</span> enabled but missing a key / file / terminal ·
+      <span class="state unknown">NOT CHECKED YET</span> enabled, nothing has used it ·
+      <span class="state off">OFF</span> disabled in config
+    </div>
+  </section>
+
+  {% if conn.uw_budget and (conn.uw_budget.calls or conn.uw_budget.cap or conn.uw_budget.paused) %}
+  <section class="{{ 'col-6' if not conn.uw_budget.blocked else '' }}" style="{{ 'border-color: rgba(245,158,11,.6)' if conn.uw_budget.blocked else '' }}">
+    <h2>Unusual Whales budget <span class="m sub">calls today (UTC {{ conn.uw_budget.date }}) across daemon, dashboard and CLI</span></h2>
+    <div class="stats">
+      <div class="stat"><div class="k">Calls today{{ info("Unusual Whales requests made today (UTC) by every qmag process sharing this machine's cache directory.") }}</div><div class="v">{{ '{:,}'.format(conn.uw_budget.calls) }}</div></div>
+      <div class="stat"><div class="k">Daily cap{{ info("UNUSUAL_WHALES_DAILY_CAP from the settings page. Once reached, calls are refused locally until 00:00 UTC and recorded as data gaps.") }}</div><div class="v {{ 'sm' if not conn.uw_budget.cap }}">{{ '{:,}'.format(conn.uw_budget.cap) if conn.uw_budget.cap else 'none set' }}</div></div>
+      <div class="stat"><div class="k">Remaining</div><div class="v {{ 'a' if conn.uw_budget.remaining is not none and conn.uw_budget.remaining < 100 }}">{{ '{:,}'.format(conn.uw_budget.remaining) if conn.uw_budget.remaining is not none else '–' }}</div></div>
+      <div class="stat"><div class="k">State{{ info("PAUSED: the API answered that the plan's daily limit is exhausted, so nothing is called until midnight UTC. CAP REACHED: your own daily cap. Either way the flow, edge and price readings from this source stay empty and say why.") }}</div><div class="v sm {{ 'r' if conn.uw_budget.blocked else 'g' }}">{{ 'PAUSED' if conn.uw_budget.paused else 'CAP REACHED' if conn.uw_budget.blocked else 'calling' }}</div></div>
+    </div>
+    {% if conn.uw_budget.blocked %}<div class="gaps" style="margin-top:10px"><b>No Unusual Whales calls until 00:00 UTC</b><ul><li>{{ conn.uw_budget.blocked }}</li><li>Flow, edge and (if selected) price readings from this source are recorded as data gaps in every cycle until then — nothing is substituted.</li></ul></div>{% endif %}
+  </section>
+  {% endif %}
+
+  {% if conn.data_gaps %}
+  <section>
+    <h2>Data gaps in the last cycle <span class="count">{{ conn.data_gaps|length }}</span> <span class="m sub">as of {{ conn.report_asof }} · generated {{ conn.report_generated_at|ago }}</span></h2>
+    <div class="gaps" style="margin:0"><ul>{% for g in conn.data_gaps %}<li>{{ g }}</li>{% endfor %}</ul></div>
+  </section>
+  {% endif %}
+
+  {% for g in conn.groups %}
+  <section>
+    <h2>{{ g.label }} <span class="count">{{ g.connections|selectattr('enabled')|list|length }} on</span></h2>
+    <div class="table-wrap"><table class="conn">
+      <tr><th>Status{{ info("OK answered on its last attempt; DEGRADED partly worked or is stale; ERROR failed; NOT CONFIGURED is enabled but missing a key, file or terminal; NOT CHECKED YET has not been used; OFF is disabled in the strategy settings.") }}</th><th>Connection{{ info("What the desk asks this connection for. 'required' means the trader opens no new positions while it is down - missing data is never substituted.") }}</th><th>Configured as{{ info("How this connection is set up right now: provider, endpoint, key present or missing, budget used.") }}</th><th>Last OK{{ info("When this connection last answered successfully - from real use by the daemon, CLI or dashboard, or from Test connections now.") }}</th><th class="num">Latency{{ info("Round-trip time of the last attempt.") }}</th><th class="num">Items{{ info("What the last successful call returned: bars, tickers, headlines, alerts...") }}</th><th class="num">Fails{{ info("Total failed attempts, and how many in a row right now.") }}</th><th>Last error{{ info("The last error message, verbatim, and when it happened.") }}</th><th>Detail{{ info("What the last attempt did.") }}</th></tr>
+      {% for c in g.connections %}
+      <tr class="{{ 'dim' if not c.enabled }}" data-name="{{ c.name }}">
+        <td><span class="state {{ c.state }}">{{ c.state|state_label }}</span>{% if c.testable %}<div style="margin-top:6px"><button type="button" class="ghost mini test-one" data-name="{{ c.name }}" title="Exercise only this connection now and record the result">Test</button></div>{% endif %}</td>
+        <td class="wrap"><b>{{ c.label }}</b>{% if c.required %} <span class="tag" title="the trader will not open new positions without it">required</span>{% endif %}<div class="m" style="font-size:11px">feeds: {{ c.feeds }}</div></td>
+        <td class="detail">{{ c.note }}</td>
+        <td title="{{ c.last_ok or '' }}">{{ c.last_ok|ago if c.enabled else '–' }}</td>
+        <td class="num">{{ '%.0f ms'|format(c.latency_ms) if c.latency_ms is not none else '–' }}</td>
+        <td class="num">{{ '{:,}'.format(c['items']) if c['items'] is not none else '–' }}</td>
+        <td class="num {{ 'r' if c.consecutive_failures else '' }}">{{ c.failures }}{% if c.consecutive_failures %}<div class="m" style="font-size:10px; white-space:normal">{{ c.consecutive_failures }} in a row</div>{% endif %}</td>
+        <td class="err">{% if c.last_error %}{{ c.last_error }}<div class="m" style="font-size:11px">{{ c.last_error_at|ago }}</div>{% else %}–{% endif %}</td>
+        <td class="detail">{{ c.detail }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+  </section>
+  {% endfor %}
+
+  <section id="halt" style="{{ 'border-color: rgba(239,68,68,.6)' if settings.halt else '' }}">
+    <h2>Kill switch <span class="state {{ 'error' if settings.halt else 'ok' }}">{{ 'TRADING HALTED' if settings.halt else 'TRADING ENABLED' }}</span>
+      <span class="m sub">one switch the daemon, the dashboard and the CLI all honour · state file <code>halt.json</code></span></h2>
+    {% if settings.halt %}
+    <p style="margin:0 0 10px; font-size:13px; line-height:1.5">
+      Thrown by <b>{{ settings.halt.by }}</b> {{ settings.halt.at|ago }} ({{ settings.halt.at[:19] }}){% if settings.halt.reason %}: <b>{{ settings.halt.reason }}</b>{% endif %}.
+      {% if settings.halt.flattened %}Open positions were flattened at market when the switch was thrown.{% else %}Open positions are still managed (stops, targets, trails); nothing new is opened and resting buy-stops were cancelled.{% endif %}
+    </p>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+      <button id="resume">Resume trading</button>
+      {% if not settings.halt.flattened %}<button id="flatten" class="danger">Also flatten open positions now</button>{% endif %}
+      <span class="m" style="font-size:12px">CLI: <code>qmag resume</code></span>
+    </div>
+    {% else %}
+    <p class="m" style="margin:0 0 10px; font-size:13px; line-height:1.5">
+      <b>Halt</b> stops every new entry immediately — the daemon skips planning, resting buy-stops are cancelled, manual buys are refused (arming is still allowed) and order tests are blocked — while open positions keep being managed.
+      <b>Halt and flatten</b> also sells every open position at market and journals the closes with reason <code>halt</code>. Both are recorded in the connection health log.
+    </p>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+      <label class="m" style="font-size:12px; flex:1; min-width:200px">Reason <input id="halt-reason" placeholder="why (shown on every page)" style="width:100%"></label>
+      <button id="halt-btn" class="danger">Halt new entries</button>
+      <button id="halt-flatten" class="danger">Halt and flatten everything</button>
+      <span class="m" style="font-size:12px">CLI: <code>qmag halt --reason "..." [--flatten]</code></span>
+    </div>
+    {% endif %}
+    <div id="halt-msg" class="m" style="margin-top:8px; font-size:12px"></div>
+  </section>
+
+  <section class="col-6">
+    <h2>Alerts <span class="m sub">fills, exits with their R, kill switch, daily loss limit, data blocking entries, failed cycles / tasks / order tests — pushed to your phone</span></h2>
+    <p class="m" style="margin:0 0 10px; font-size:13px; line-height:1.5">
+      Channels come from the <a href="/settings">settings page</a>: a Telegram bot (token + chat id) and/or one webhook URL (Slack, Discord, ntfy…). Nothing is sent when neither is set — the <i>Alerts</i> line above shows NOT CONFIGURED instead of pretending.
+    </p>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+      <button id="alert-test" class="ghost">Send a test alert</button>
+      <span id="alert-msg" class="m" style="font-size:12px"></span>
+    </div>
+  </section>
+
+  <section class="col-6">
+    <h2>Broker order routing <span class="m sub">send a test order through the same calls the trader uses · {{ conn.broker }} · {{ 'LIVE' if conn.live else 'paper' }}</span></h2>
+    <p class="m" style="margin:0 0 10px; font-size:13px; line-height:1.5">
+      <b>Bracket round-trip</b> places a 1-share buy-stop bracket 50 % above the market (it cannot fill), checks the broker lists it, cancels it and checks it is gone — safe on any account.
+      <b>Fill &amp; flatten</b> buys 1 share at market and sells it again; paper accounts only{% if conn.live %} (disabled here: live account){% endif %}. Both are tagged <code>qmag-test</code>, refuse a symbol the trader holds or has armed, and are recorded on the <i>Broker order routing</i> line above.
+    </p>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+      <label class="m" style="font-size:12px">Symbol <input id="ot-symbol" value="{{ test_symbol }}" style="width:90px; text-transform:uppercase"></label>
+      <button class="ot" data-kind="bracket" {% if order_run.running %}disabled{% endif %}>Test bracket round-trip</button>
+      <button class="ot ghost" data-kind="fill" {% if order_run.running or conn.live %}disabled{% endif %} title="{{ 'paper accounts only' if conn.live else '1-share market buy then sell' }}">Test 1-share fill &amp; flatten</button>
+      {% if order_run.running %}<span class="m">running {{ order_run.kind }} on {{ order_run.symbol }}…</span>{% elif order_run.error %}<span class="r" style="font-size:12px">last test failed: {{ order_run.error }}</span>{% endif %}
+    </div>
+    {% if order_tests %}
+    <div class="table-wrap" style="margin-top:12px"><table>
+      <tr><th>When</th><th>Test</th><th>Result</th><th>Steps</th></tr>
+      {% for t in order_tests %}
+      <tr>
+        <td class="m" title="{{ t.started_at }}">{{ t.started_at|ago }}</td>
+        <td><b>{{ t.kind }}</b> {{ t.symbol }}<div class="m" style="font-size:11px">{{ t.broker }}{{ ' · LIVE' if t.live }}</div></td>
+        <td class="wrap" style="font-size:12px"><span class="state {{ 'ok' if t.ok else 'error' }}">{{ 'PASSED' if t.ok else 'FAILED' }}</span><div class="m" style="margin-top:4px">{{ t.note if t.ok else t.error }}</div></td>
+        <td class="wrap" style="font-size:12px">{% for st in t.steps %}<div><span class="{{ 'g' if st.ok else 'r' }}">{{ '✓' if st.ok else '✗' }}</span> {{ st.name }} <span class="m">{{ st.detail }}{% if st.ms %} · {{ st.ms }} ms{% endif %}</span></div>{% endfor %}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <div class="empty" style="margin-top:12px">No test order sent yet.</div>
+    {% endif %}
+  </section>
+
+  {% if daemon %}
+  <section class="col-6">
+    <h2>Daemon tasks <span class="m sub">heartbeat {{ daemon.heartbeat|ago }}{% if daemon.running %} · running {{ daemon.running }}{% endif %}</span></h2>
+    <div class="table-wrap"><table>
+      <tr><th>Task</th><th class="num">Runs</th><th>Last run</th><th>Last error</th></tr>
+      {% for t in daemon.tasks %}
+      <tr><td><b>{{ t.name }}</b></td><td class="num">{{ t.runs }}</td><td>{{ t.last_run|ago }}</td><td class="err">{{ t.last_error or '–' }}</td></tr>
+      {% endfor %}
+    </table></div>
+  </section>
+  {% endif %}
+</main>
+{% endblock %}
+
+{% block footer %}
+  state {{ settings.state_dir }} · registry connections.json · status generated {{ conn.generated_at[:19] }} UTC · python {{ conn.python }}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const probe = document.getElementById('probe');
+  const waitForProbe = () => {
+    const poll = setInterval(async () => {
+      const s = await (await fetch('/api/status')).json();
+      if (!s.probe.running) { clearInterval(poll); location.reload(); }
+    }, 1500);
+  };
+  probe.addEventListener('click', async () => {
+    probe.disabled = true; probe.textContent = 'Testing connections…';
+    await fetch('/api/status/probe', { method: 'POST' });
+    waitForProbe();
+  });
+  // One connection at a time: synchronous probe, the row is refreshed in place.
+  const label = (st) => ({ok: 'OK', degraded: 'DEGRADED', error: 'ERROR', not_configured: 'NOT CONFIGURED', unknown: 'NOT CHECKED YET', off: 'OFF'}[st] || st.toUpperCase());
+  document.querySelectorAll('.test-one').forEach(btn => btn.addEventListener('click', async () => {
+    const name = btn.dataset.name, row = btn.closest('tr'), cells = row.querySelectorAll('td');
+    btn.disabled = true; btn.textContent = 'Testing…';
+    try {
+      const r = await fetch('/api/status/probe', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({names: [name]}) });
+      if (r.status === 409) { btn.textContent = 'Busy'; setTimeout(() => { btn.textContent = 'Test'; btn.disabled = false; }, 2500); return; }
+      const d = await r.json(), c = d.connections && d.connections[name];
+      if (!c) throw new Error(d.error || d.reason || 'no result');
+      row.querySelector('.state').className = 'state ' + c.state; row.querySelector('.state').textContent = label(c.state);
+      cells[3].textContent = c.last_ok ? 'just now' : '–'; cells[3].title = c.last_ok || '';
+      cells[4].textContent = c.latency_ms != null ? Math.round(c.latency_ms) + ' ms' : '–';
+      cells[5].textContent = c.items != null ? c.items.toLocaleString() : '–';
+      cells[6].innerHTML = c.failures + (c.consecutive_failures ? `<div class="m" style="font-size:10px; white-space:normal">${c.consecutive_failures} in a row</div>` : '');
+      cells[6].className = 'num' + (c.consecutive_failures ? ' r' : '');
+      cells[7].innerHTML = c.last_error ? `${c.last_error.replace(/</g, '&lt;')}<div class="m" style="font-size:11px">${c.state === 'error' ? 'just now' : ''}</div>` : '–';
+      cells[8].textContent = c.detail || '';
+    } catch (e) { cells[7].textContent = 'test failed: ' + e.message; }
+    btn.textContent = 'Test'; btn.disabled = false;
+  }));
+  const waitForOrderTest = () => {
+    const poll = setInterval(async () => {
+      const s = await (await fetch('/api/status/order-tests')).json();
+      if (!s.run.running) { clearInterval(poll); location.reload(); }
+    }, 1500);
+  };
+  document.querySelectorAll('button.ot').forEach(b => b.addEventListener('click', async () => {
+    const kind = b.dataset.kind;
+    const symbol = (document.getElementById('ot-symbol').value || '').toUpperCase().trim();
+    if (kind === 'fill' && !confirm(`Buy 1 share of ${symbol} at market and sell it again on the paper account?`)) return;
+    if ({{ 'true' if conn.live else 'false' }} && !confirm(`LIVE account: place and cancel a 1-share buy-stop bracket on ${symbol} 50% above the market? It cannot fill.`)) return;
+    document.querySelectorAll('button.ot').forEach(x => x.disabled = true);
+    const r = await fetch('/api/status/order-test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, symbol }) });
+    if (!r.ok) { alert((await r.json()).detail || 'refused'); location.reload(); return; }
+    waitForOrderTest();
+  }));
+  const isLive = {{ 'true' if conn.live else 'false' }};
+  const haltMsg = document.getElementById('halt-msg');
+  const setHalt = async (on, flatten) => {
+    const reason = (document.getElementById('halt-reason') || {}).value || '';
+    if (on && flatten && !confirm(`Sell EVERY open position at market${isLive ? ' on the LIVE account' : ''} and halt all new entries?`)) return;
+    if (on && !flatten && !confirm('Halt all new entries now? Open positions keep being managed.')) return;
+    if (!on && !confirm('Resume trading? The next cycle may open new positions again.')) return;
+    document.querySelectorAll('#halt button').forEach(b => b.disabled = true);
+    haltMsg.textContent = on ? (flatten ? 'Flattening and halting…' : 'Halting…') : 'Resuming…';
+    const r = await fetch('/api/halt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on, reason, flatten, confirm_live: isLive }) });
+    const j = await r.json();
+    if (!r.ok) { haltMsg.textContent = j.detail || 'refused'; haltMsg.className = 'r'; document.querySelectorAll('#halt button').forEach(b => b.disabled = false); return; }
+    haltMsg.textContent = j.message; setTimeout(() => location.reload(), 1200);
+  };
+  const bind = (id, on, flatten) => { const el = document.getElementById(id); if (el) el.addEventListener('click', () => setHalt(on, flatten)); };
+  const alertBtn = document.getElementById('alert-test'), alertMsg = document.getElementById('alert-msg');
+  alertBtn.addEventListener('click', async () => {
+    alertBtn.disabled = true; alertMsg.className = 'm'; alertMsg.textContent = 'Sending…';
+    const r = await fetch('/api/alerts/test', { method: 'POST' }); const j = await r.json();
+    alertMsg.className = j.ok ? 'g' : 'r';
+    alertMsg.textContent = j.ok ? `Delivered to ${j.channels.join(' + ')}` : (j.error || 'failed');
+    alertBtn.disabled = false;
+  });
+  bind('halt-btn', true, false); bind('halt-flatten', true, true); bind('resume', false, false); bind('flatten', true, true);
+  {% if probe.running %}waitForProbe();{% elif order_run.running %}waitForOrderTest();{% else %}setTimeout(() => location.reload(), 60000);{% endif %}
+</script>
+{% endblock %}

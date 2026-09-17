@@ -1,0 +1,327 @@
+{% extends "base.html" %}
+{% set active = 'desk' %}
+{% import "_macros.html" as m %}
+{% set rep = report %}
+
+{% block header_pills %}
+  {% if rep %}
+    {% set unknown = rep.regime_known is defined and not rep.regime_known %}
+    <span class="pill {{ 'warn' if unknown else 'on' if rep.regime_ok else 'off' }}"><i class="dot"></i>{{ 'Regime unknown' if unknown else 'Risk-on' if rep.regime_ok else 'Risk-off' }}</span>
+    <span class="pill" title="{{ 'Focused pass over ' ~ (rep.scope|length) ~ ' names (arming list + positions + pending); breadth and themes from the full scan as of ' ~ (rep.full_scan_asof or '?') if rep.scan == 'focused' else 'Full scan over the whole universe' }}">{{ rep.asof }} · {{ rep.label }}{% if rep.scan == 'focused' %} · focused {{ rep.scope|length }}{% endif %}</span>
+  {% endif %}
+  {% if config.entry is defined %}<span class="pill {{ 'on' if config.entry.mode == 'confirmed' else 'warn' if config.entry.mode == 'resting' else '' }}" title="{{ 'Confirmed entries: no resting orders. A setup is bought at market only when the live bar holds above the pivot on >= ' ~ config.entry.confirm_volume_ratio ~ 'x volume pace, after the first ' ~ config.entry.opening_range_minutes ~ ' minutes.' if config.entry.mode == 'confirmed' else 'Resting buy-stop-limit brackets parked at the pivot (fill on price alone).' if config.entry.mode == 'resting' else 'Hybrid: confirmed market entries plus buy-stops parked from ' ~ config.entry.resting_from ~ ', cancelled after the close.' }}{% if config.entry.failed_breakout_exit %} Failed breakouts (close back below the pivot within {{ config.entry.failed_breakout_days }} day) are cut.{% endif %}">entry · {{ config.entry.mode }}</span>{% endif %}
+  {% if config.schedule is defined %}<span class="pill {{ 'on' if config.schedule.tiered else '' }}" title="{{ 'Tiered schedule: nightly whole-universe scan arms a shortlist; pre-market gap screen; focused passes every ' ~ config.schedule.focused_interval_minutes ~ ' min on the arming list + positions + gappers; movers sweep every ' ~ config.schedule.movers_interval_minutes ~ ' min; Saturday unusual-options scan' if config.schedule.tiered else 'Legacy schedule: full scan after the open, every 30 min and after the close' }}">{{ 'tiered' if config.schedule.tiered else 'legacy' }} schedule</span>{% endif %}
+  {% if status %}
+    <span class="pill" title="daemon heartbeat {{ status.heartbeat }}"><i class="dot" style="color: var(--green)"></i>daemon{% if status.next_task %} · next {{ status.next_task.name }} {{ status.next_task.at[11:16] }} NY{% endif %}</span>
+  {% else %}
+    <span class="pill m">daemon not running</span>
+  {% endif %}
+{% endblock %}
+
+{% block header_actions %}
+  {% if not settings.live %}
+  <button id="run" {% if run.running %}disabled{% endif %}>{{ 'Cycle running…' if run.running else 'Run cycle now' }}</button>
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+<main>
+  <section class="col-8">
+    <h2>Market</h2>
+    {% if rep %}
+    <div class="stats">
+      <div class="stat"><div class="k">Equity{{ m.info("Account equity as the broker reported it at the end of the last cycle: cash plus open positions at the latest prices. Every risk budget is a fraction of this number.") }}</div><div class="v">${{ '{:,.0f}'.format(rep.equity or 0) }}</div></div>
+      {% if account and account.cash is not none %}
+      <div class="stat"><div class="k">Cash{{ m.info("Uninvested cash as the broker reported it in the last account snapshot (" ~ (account.asof|ago) ~ "). Full holdings and P&L per account: accounts page.") }}</div><div class="v">{{ '{:,.0f}'.format(account.cash) }} <span class="m" style="font-size:12px">{{ account.currency }}</span></div></div>
+      <div class="stat"><div class="k">Open P&amp;L{{ m.info("Unrealised profit or loss on every holding the broker reports, marked at the latest real bar" ~ (" (" ~ account.marks_asof ~ ")" if account.marks_asof else "") ~ ". Blank when a holding has no fresh bar - nothing is estimated.") }}</div><div class="v {{ 'g' if (account.unrealized or 0) > 0 else 'r' if (account.unrealized or 0) < 0 else '' }}">{% if account.unrealized is not none and account.unrealized_known %}{{ '{:+,.0f}'.format(account.unrealized) }}{% else %}<a href="/accounts" class="m" style="font-size:13px">not marked</a>{% endif %}</div></div>
+      {% elif ledger %}<div class="stat"><div class="k">Cash{{ m.info("Uninvested cash in the built-in paper ledger.") }}</div><div class="v">${{ '{:,.0f}'.format(ledger.cash) }}</div></div>{% endif %}
+      {% set unknown = rep.regime_known is defined and not rep.regime_known %}
+      <div class="stat"><div class="k">Regime{{ m.info("Market-sentiment gate: GO when the benchmark is above its moving average, breadth is wide enough and (if set) VIX is under its ceiling. STAND ASIDE blocks new longs; open positions are still managed. UNKNOWN means an input was missing - treated as risk-off, never guessed.") }}</div><div class="v {{ 'a' if unknown else 'g' if rep.regime_ok else 'r' }}">{{ 'UNKNOWN' if unknown else 'GO' if rep.regime_ok else 'STAND ASIDE' }}</div></div>
+      <div class="stat"><div class="k">Universe scanned{{ m.info("Tickers with usable bars in the last whole-universe scan (nightly, or the post-open pass).") }}</div><div class="v">{{ '{:,}'.format(rep.universe_size or 0) }}</div></div>
+      <div class="stat"><div class="k">Triggered / watch{{ m.info("Triggered: setups whose pivot was taken out on the latest bar. Watch: tight flags still under their pivot, candidates for the arming list.") }}</div><div class="v">{{ rep.triggered|length }} / {{ rep.watchlist|length }}</div></div>
+      <div class="stat"><div class="k">Open / pending{{ m.info("Open: positions the trader manages (with a stop at the broker). Pending: resting buy-stop brackets waiting for a trigger. Together they may not exceed risk.max_positions.") }}</div><div class="v">{{ positions|length }} / {{ pending|length }}</div></div>
+      <div class="stat"><div class="k">Risk per trade{{ m.info("Share of equity lost if a new position hits its initial stop: risk.risk_per_trade_pct times the adaptive multiplier (shown when it is not 1.00), which follows the realised R of recent trades.") }}</div><div class="v {{ 'a' if journal.risk_mult != 1.0 else '' }}">{{ '%.2f%%'|format(config.risk.risk_per_trade_pct * 100 * journal.risk_mult) }}{% if journal.risk_mult != 1.0 %} <span class="m" style="font-size:12px">×{{ '%.2f'|format(journal.risk_mult) }}</span>{% endif %}</div></div>
+      {% if rep.heat_pct is defined %}
+      {% set heat_cap = config.risk.max_portfolio_heat_pct %}
+      <div class="stat"><div class="k">Open heat{{ m.info("What every open position would lose from the latest price to its stop, plus what every resting entry would lose if it filled and stopped, as a share of equity. New entries are refused when this plus the new trade's risk would exceed risk.max_portfolio_heat_pct.") }}</div><div class="v {{ 'r' if heat_cap and rep.heat_pct >= heat_cap else 'a' if heat_cap and rep.heat_pct >= heat_cap * 0.75 else '' }}">{{ '%.1f%%'|format((rep.heat_pct or 0) * 100) }}{% if heat_cap %} <span class="m" style="font-size:12px">of {{ '%.0f%%'|format(heat_cap * 100) }}</span>{% endif %}</div></div>
+      {% endif %}
+      {% if rep.day_pnl_pct is defined and rep.day_pnl_pct is not none %}
+      {% set loss_cap = config.risk.daily_loss_limit_pct %}
+      <div class="stat"><div class="k">Today{{ m.info("Equity change since the first pass of the session. At -risk.daily_loss_limit_pct the circuit-breaker stops new entries for the rest of the day; exits keep running.") }}</div><div class="v {{ 'r' if loss_cap and rep.day_pnl_pct <= -loss_cap else 'g' if rep.day_pnl_pct > 0 else 'r' if rep.day_pnl_pct < 0 else '' }}">{{ '%+.2f%%'|format(rep.day_pnl_pct * 100) }}{% if loss_cap and rep.day_pnl_pct <= -loss_cap %} <span class="m" style="font-size:12px">limit hit</span>{% endif %}</div></div>
+      {% endif %}
+    </div>
+    {% if rep.risk_blocked %}
+    <div class="gaps" style="background:#2a2214; border-left-color: var(--amber)"><b>Portfolio limits held back {{ rep.risk_blocked|length }} entr{{ 'y' if rep.risk_blocked|length == 1 else 'ies' }}:</b>
+      {% for b in rep.risk_blocked %}<div>{{ b.symbol }} ({{ b.setup.replace('_', ' ') }}) — {{ b.reasons|join('; ') }}</div>{% endfor %}
+    </div>
+    {% endif %}
+    <p class="m" style="margin: 12px 0 0">{{ rep.regime_note }}{% if rep.freshness and rep.freshness.latest %} · latest bar {{ rep.freshness.latest }} on {{ rep.freshness.on_latest }}/{{ rep.freshness.symbols }} symbols{% endif %}</p>
+    {{ m.gaps_box(rep.data_gaps, 'Data gaps this cycle — nothing was substituted') }}
+    {% if sources %}
+    <div style="margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center">
+      {% for s in sources %}<span class="pill {{ 'on' if s.ok == s.total else 'off' if s.ok == 0 else 'warn' }}" title="{{ s.error or (s.ok ~ '/' ~ s.total ~ ' symbols') }}"><i class="dot"></i>{{ s.label }}</span>{% endfor %}
+      <a class="m" href="/status" style="font-size:12px">all connections →</a>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="empty">No report yet. Run <code>qmag paper run</code>, click <b>Run cycle now</b>, or start the daemon and this page fills in after the first cycle.</div>
+    {% endif %}
+  </section>
+
+  <section class="col-4">
+    <h2>Theme momentum <span class="m sub">the typical member's move, not the best one's</span></h2>
+    {% if themes %}
+    <div class="table-wrap"><table>
+      <tr><th>Theme</th><th class="num">1m{{ m.info("One-month move of the theme index, built from the MEDIAN member's daily return: it rises only when the typical stock in the group rises, so a single name tripling cannot make its industry look hot.") }}</th><th class="num">Pct{{ m.info("Where the theme's 1m/3m momentum composite ranks among all themes (full bar = the strongest theme). Breakouts need at least themes.min_theme_percentile.") }}</th><th class="num">Breadth{{ m.info("Share of the theme's members above their 20-day moving average. Breakouts need at least themes.min_theme_breadth.") }}</th></tr>
+      {% for t in themes[:12] %}
+      <tr>
+        <td class="wrap" title="{{ t.theme }}{% if t.members %} · {{ t.members }} members scanned{% endif %}">{{ t.theme|replace('Industry: ', '') }}{% if t.theme.startswith('Industry: ') %} <span class="tag" style="margin-left:2px">ind</span>{% endif %}{% if t.members %} <span class="m" style="font-size:11px">{{ t.members }}</span>{% endif %}</td>
+        <td class="num {{ 'g' if (t.gain_1m or 0) >= 0 else 'r' }}">{{ '%+.1f%%'|format((t.gain_1m or 0) * 100) }}</td>
+        <td class="num"><div class="bar" title="{{ '%.2f'|format(t.pct or 0) }}"><i style="width: {{ ((t.pct or 0) * 100)|int }}%"></i></div></td>
+        <td class="num">{{ '%.0f%%'|format((t.breadth or 0) * 100) if t.breadth is not none else '–' }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <div class="empty">Themes disabled or no data.</div>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Trade plans <span class="count">{{ plans|length }}</span> <span class="m sub">research plans · see pending entries and positions for execution status</span></h2>
+    {% if plans %}
+    <div class="cards">
+      {% for p in plans %}{{ m.plan_card(p, config) }}{% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No new trade plans in the last cycle{% if rep and not rep.regime_ok %} — regime is risk-off: nothing is bought while the index is below its 20-day MA and breadth is weak{% endif %}.</div>
+    {% endif %}
+  </section>
+
+  {% if not plans and rejected %}
+  <section>
+    <h2>Blocked setups <span class="count">{{ rejected|length }}</span> <span class="m sub">the setups that triggered, fully sized and justified, and exactly why they were not taken</span></h2>
+    <div class="cards">
+      {% for p in rejected[:6] %}{{ m.plan_card(p, config) }}{% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  <section class="col-6">
+    <h2>Open positions <span class="count">{{ positions|length }}</span></h2>
+    {% if positions %}
+    <div class="table-wrap"><table>
+      <tr><th>Symbol</th><th>Setup</th><th>Opened</th><th class="num">Entry</th><th class="num">Left / size</th><th class="num">Last{{ m.info("Latest real close from the account snapshot. Blank when no fresh bar was available - never estimated.") }}</th><th class="num">P&amp;L{{ m.info("Unrealised profit or loss on the remaining shares at the latest real close.") }}</th><th class="num">Stop</th><th class="num">Target</th><th>Stage</th></tr>
+      {% for p in positions %}
+      <tr>
+        <td><b><a href="/symbol/{{ p.symbol }}">{{ p.symbol }}</a></b>{% if p.chart %} <a class="m" href="{{ p.chart }}" target="_blank" title="chart">▣</a>{% endif %}</td>
+        <td class="m">{{ p.setup.replace('_',' ') }}</td>
+        <td>{{ p.entry_date }}</td>
+        <td class="num">{{ '%.2f'|format(p.entry_price) }}</td>
+        <td class="num">{{ p.remaining if p.remaining is defined and p.remaining >= 0 else p.shares }} / {{ p.shares }}</td>
+        <td class="num" title="{{ p.mark_asof or '' }}">{{ '%.2f'|format(p.last) if p.last is not none else '–' }}</td>
+        <td class="num {{ 'g' if (p.unrealized or 0) > 0 else 'r' if (p.unrealized or 0) < 0 else '' }}">{% if p.unrealized is not none %}{{ '{:+,.0f}'.format(p.unrealized) }} <span class="m" style="font-size:11px">{{ '%+.1f%%'|format(p.unrealized_pct * 100) }}</span>{% else %}–{% endif %}</td>
+        <td class="num {{ 'g' if p.stop >= p.entry_price else 'r' }}">{{ '%.2f'|format(p.stop) }}</td>
+        <td class="num b">{{ '%.2f'|format(p.target) if p.target and not p.partial_done else '–' }}</td>
+        <td>{{ 'trailing MA' if p.partial_done else 'initial risk' }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    <p class="m" style="margin:8px 0 0; font-size:12px">Holdings the broker reports outside qmag, cash and P&amp;L per account: <a href="/accounts">accounts →</a></p>
+    {% else %}
+    <div class="empty">Flat.</div>
+    {% endif %}
+  </section>
+
+  <section class="col-6">
+    <h2>Pending entries <span class="count">{{ pending|length }}</span></h2>
+    {% if pending %}
+    <div class="table-wrap"><table>
+      <tr><th>Symbol</th><th>Type</th><th class="num">Trigger</th><th class="num">Stop</th><th class="num">Target</th><th class="num">Qty</th><th>Planned</th></tr>
+      {% for p in pending %}
+      <tr>
+        <td><b><a href="/symbol/{{ p.symbol }}">{{ p.symbol }}</a></b>{% if p.chart %} <a class="m" href="{{ p.chart }}" target="_blank" title="chart">▣</a>{% endif %}</td>
+        <td class="m">{{ p.entry_kind or 'buy_stop' }}</td>
+        <td class="num g">{{ '%.2f'|format(p.trigger) }}</td>
+        <td class="num r">{{ '%.2f'|format(p.stop) }}</td>
+        <td class="num b">{{ '%.2f'|format(p.target) if p.target else '–' }}</td>
+        <td class="num">{{ p.qty }}</td>
+        <td>{{ p.planned_on }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <div class="empty">{% if config.entry is defined and config.entry.mode == 'confirmed' %}No resting orders by design (confirmed mode): armed names are bought at market by the focused pass once the pivot breaks and holds on volume.{% elif config.entry is defined and config.entry.mode == 'hybrid' %}No resting buy-stops right now (hybrid mode parks them from {{ config.entry.resting_from }} and cancels them after the close).{% else %}No resting buy-stops. New plans are parked after each close.{% endif %}</div>
+    {% endif %}
+    {% if rep and rep.held %}
+    <h2 style="margin-top:14px">Held back this pass <span class="count">{{ rep.held|length }}</span> <span class="m sub">broke the pivot but not confirmed — still armed</span></h2>
+    <div class="table-wrap"><table>
+      <tr><th>Symbol</th><th class="num">Pivot</th><th class="num">Last</th><th class="num">RVOL</th><th>Why it waits</th></tr>
+      {% for h in rep.held %}
+      <tr><td><b><a href="/symbol/{{ h.symbol }}">{{ h.symbol }}</a></b></td><td class="num">{{ '%.2f'|format(h.pivot) }}</td><td class="num">{{ '%.2f'|format(h.close) }}</td><td class="num">{{ '%.2fx'|format(h.rvol) if h.rvol is not none else '–' }}</td><td class="wrap" style="font-size:12px">{{ h.reasons|join('; ') }}</td></tr>
+      {% endfor %}
+    </table></div>
+    {% endif %}
+  </section>
+
+  <section class="col-6">
+    <h2>Arming list <span class="count">{{ arming|length }}</span> <span class="m sub">the shortlist the intraday passes watch every {{ config.schedule.focused_interval_minutes if config.schedule is defined else 5 }} min</span></h2>
+    {% if arming %}
+    <div class="table-wrap"><table>
+      <tr><th>Symbol</th><th>Setup</th><th class="num">Pivot</th><th class="num">To pivot</th><th class="num">Stop</th><th class="num">Score</th><th>Source</th><th>Armed</th></tr>
+      {% for a in arming[:40] %}
+      <tr>
+        <td><b><a href="/symbol/{{ a.symbol }}">{{ a.symbol }}</a></b>{% if a.triggered %} <span class="tag g" title="setup fired on the last bar">fired</span>{% endif %}</td>
+        <td class="m">{{ a.setup }}</td>
+        <td class="num">{{ '%.2f'|format(a.pivot) if a.pivot else '–' }}</td>
+        <td class="num {{ 'g' if a.distance_pct is not none and a.distance_pct <= (config.schedule.trigger_distance_pct if config.schedule is defined else 0.02) else '' }}">{{ '%.1f%%'|format(a.distance_pct * 100) if a.distance_pct is not none else '–' }}</td>
+        <td class="num r">{{ '%.2f'|format(a.stop) if a.stop else '–' }}</td>
+        <td class="num">{{ '%.2f'|format(a.score or 0) }}</td>
+        <td class="m" title="{{ 'gap ' ~ ('%+.1f%%'|format(a.screen.change_pct * 100)) ~ (' · rvol ' ~ a.screen.rvol if a.screen.rvol else '') if a.screen is defined and a.screen else '' }}">{{ a.source }}{% if a.screen is defined and a.screen and a.screen.change_pct is not none %} <span class="tag">{{ '%+.0f%%'|format(a.screen.change_pct * 100) }}</span>{% endif %}</td>
+        <td class="m">{{ a.armed_on }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <div class="empty">Nothing armed yet. The nightly full scan arms every flag within {{ '%.0f%%'|format((config.schedule.arming_distance_pct if config.schedule is defined else 0.05) * 100) }} of its pivot; pre-market gaps and intraday movers are added during the day.</div>
+    {% endif %}
+  </section>
+
+  <section class="col-6">
+    <h2>Watchlist <span class="count">{{ rep.watchlist|length if rep else 0 }}</span> <span class="m sub">flags near their pivot{% if rep and rep.scan == 'focused' %} (this focused pass){% endif %}</span></h2>
+    {% if rep and rep.watchlist %}
+    <div class="table-wrap"><table>
+      <tr><th>Symbol</th><th class="num">Pivot</th><th class="num">To pivot</th><th class="num">Stop</th><th class="num">ADR</th><th class="num">Score</th><th>Theme</th></tr>
+      {% for s in rep.watchlist[:25] %}
+      <tr>
+        <td><b><a href="/symbol/{{ s.symbol }}">{{ s.symbol }}</a></b></td>
+        <td class="num">{{ '%.2f'|format(s.pivot) }}</td>
+        <td class="num">{{ '%.1f%%'|format(s.details.distance_to_pivot_pct) if s.details.distance_to_pivot_pct is defined else '–' }}</td>
+        <td class="num r">{{ '%.2f'|format(s.stop) }}</td>
+        <td class="num">{{ '%.1f%%'|format(s.adr_pct) }}</td>
+        <td class="num">{{ '%.2f'|format(s.score) }}</td>
+        <td class="m">{{ (s.details.theme if s.details.theme is defined else '')|replace('Industry: ', '') }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <div class="empty">Nothing set up within 10% of a pivot.</div>
+    {% endif %}
+  </section>
+
+  <section class="col-6">
+    <h2>Rejected by the checklist <span class="count">{{ rejected|length }}</span></h2>
+    {% if rejected %}
+    <div class="table-wrap"><table>
+      <tr><th>Symbol</th><th>Setup</th><th>Failed</th><th class="num">Entry</th><th class="num">Stop</th><th class="num">Ctx</th></tr>
+      {% for p in rejected[:25] %}
+      <tr>
+        <td><b><a href="/plan/{{ p.symbol }}">{{ p.symbol }}</a></b>{% if p.chart %} <a class="m" href="{{ p.chart }}" target="_blank">▣</a>{% endif %}</td>
+        <td class="m">{{ p.setup.replace('_',' ') }}</td>
+        <td class="r">{% for k, v in p.checks.items() if not v %}{{ k.replace('_',' ') }}{{ ', ' if not loop.last }}{% endfor %}</td>
+        <td class="num">{{ '%.2f'|format(p.entry) }}</td>
+        <td class="num">{{ '%.2f'|format(p.stop) }}</td>
+        <td class="num {{ m.score_class(p.context_score) }}">{{ '%+.2f'|format(p.context_score) if p.context_score is not none else '–' }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <div class="empty">Every setup that triggered passed its checks.</div>
+    {% endif %}
+  </section>
+
+  <section class="col-6">
+    <h2>Trade journal <span class="count">{{ journal.trades }}</span> <span class="m sub">recorded outcomes · inspect evidence in the journal</span></h2>
+    <div class="stats">
+      <div class="stat"><div class="k">Win rate{{ m.info("Share of closed trades with a positive R-multiple. On its own it says little: the method wins less than half the time and makes money on the size of the winners.") }}</div><div class="v">{{ '%.0f%%'|format(journal.win_rate * 100) if journal.win_rate is not none else '–' }}</div></div>
+      <div class="stat"><div class="k">Avg R{{ m.info("Average R-multiple per closed trade: profit or loss divided by the dollars risked at the initial stop. Evidence quality, costs and forward validation matter; this average does not establish an edge.") }}</div><div class="v {{ 'g' if (journal.avg_r or 0) > 0 else 'r' if journal.avg_r is not none else '' }}">{{ '%+.2f'|format(journal.avg_r) if journal.avg_r is not none else '–' }}</div></div>
+      <div class="stat"><div class="k">Total R{{ m.info("Sum of the R-multiples of every closed trade - the objective the learning review optimises.") }}</div><div class="v {{ 'g' if journal.total_r > 0 else 'r' if journal.total_r < 0 else '' }}">{{ '%+.1f'|format(journal.total_r) }}</div></div>
+      <div class="stat"><div class="k">Realised P&amp;L{{ m.info("Recorded proceeds less entry cost for closed positions. Some prices may be estimated and broker fees are not fully reconciled. Inspect evidence in the journal.") }}</div><div class="v {{ 'g' if journal.pnl > 0 else 'r' if journal.pnl < 0 else '' }}">${{ '{:,.0f}'.format(journal.pnl) }}</div></div>
+      <div class="stat"><div class="k">Avg win / loss{{ m.info("Average R of the winning trades and of the losing trades. A healthy momentum book loses about -1R when wrong and makes several R when right.") }}</div><div class="v sm">{{ '%+.1fR'|format(journal.avg_win_r) if journal.avg_win_r is not none else '–' }} / {{ '%+.1fR'|format(journal.avg_loss_r) if journal.avg_loss_r is not none else '–' }}</div></div>
+      <div class="stat"><div class="k">Risk multiplier{{ m.info("Applied multiplier from the last cycle. Base risk is never increased automatically by the rebuilt cycle; verified losing evidence can reduce it.") }}</div><div class="v {{ 'a' if journal.risk_mult != 1.0 else '' }}">×{{ '%.2f'|format(journal.risk_mult) }}</div></div>
+    </div>
+    {% if journal.recent_r %}
+    <div style="margin-top:12px"><div class="m" style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px">Last {{ journal.recent_r|length }} trades (R)</div>
+      <div class="rbars">{% for r in journal.recent_r %}<i class="{{ 'neg' if r < 0 else '' }}" style="height: {{ (4 + (r|abs) * 12)|round|int if (r|abs) < 3 else 40 }}px" title="{{ '%+.2f'|format(r) }}R"></i>{% endfor %}</div></div>
+    {% else %}
+    <p class="m" style="margin:12px 0 0">No closed trades yet — risk stays at the configured {{ '%.2f%%'|format(config.risk.risk_per_trade_pct * 100) }} until the journal has {{ config.adaptive.min_trades if config.adaptive else 6 }} results.</p>
+    {% endif %}
+  </section>
+
+  <section class="col-6">
+    <h2>Learning <span class="m sub">what worked, what did not — <a href="/learning">full review</a></span></h2>
+    {% if learning and learning.enabled %}
+    {% if learning.generated_at %}
+    <div class="stats">
+      <div class="stat"><div class="k">Last review{{ m.info("When the learning review last ran (Saturdays by default, or on demand from the learning page).") }}</div><div class="v sm">{{ learning.generated_at[:10] }}</div></div>
+      <div class="stat"><div class="k">Trades reviewed{{ m.info("Closed trades the last review bucketed by their entry features.") }}</div><div class="v">{{ learning.trades }}</div></div>
+      <div class="stat"><div class="k">Shadow trades{{ m.info("Setups a check, gate or portfolio limit refused, followed on real bars to see what they would have made - so filters are judged on what they blocked, not only on what they let through.") }}</div><div class="v">{{ learning.shadows.total or 0 }}</div></div>
+      <div class="stat"><div class="k">Learned values{{ m.info("Knobs the review has moved (one step, inside their guard rails, with evidence). They sit on top of your settings and can be reset on the learning page.") }}</div><div class="v {{ 'a' if learning.active else '' }}">{{ learning.active|length }}</div></div>
+    </div>
+    {% if learning.lessons %}
+    <ul class="tight" style="margin:10px 0 0; font-size:13px">{% for l in learning.lessons %}<li>{{ l.text }}</li>{% endfor %}</ul>
+    {% else %}
+    <p class="m" style="margin:10px 0 0; font-size:13px">No lesson clears the evidence bar yet{% if learning.status == 'insufficient' %} ({{ learning.trades }} closed trades; knobs move only from {{ config.learning.min_trades if config.learning is defined else 8 }}){% endif %}.</p>
+    {% endif %}
+    {% if learning.active %}<p class="m" style="margin:8px 0 0; font-size:12px">In force: {% for a in learning.active %}<span class="chip a">{{ a.label }} = {{ '%g'|format(a.value) }}</span>{% endfor %}</p>{% endif %}
+    {% else %}
+    <p class="m" style="margin:0; font-size:13px">Every closed trade gets a post-mortem and every setup not taken becomes a shadow trade; the review runs {{ learning.when }} NY ({{ 'adjustments applied automatically' if learning.auto_apply else 'adjustments proposed only' }}). Nothing to report until trades close.</p>
+    {% endif %}
+    {% else %}
+    <p class="m" style="margin:0; font-size:13px">Learning is switched off in <a href="/settings">settings</a>.</p>
+    {% endif %}
+  </section>
+
+  <section class="col-6">
+    <h2>Closed trades <span class="count">{{ closed|length }}</span></h2>
+    {% if closed %}
+    <div class="table-wrap"><table>
+      <tr><th>Symbol</th><th>Setup</th><th>Opened</th><th>Closed</th><th class="num">Entry</th><th class="num">Init. stop</th><th class="num">R</th><th class="num">P&amp;L</th><th>Reason</th></tr>
+      {% for r in closed %}
+      <tr>
+        <td><b><a href="/symbol/{{ r.symbol }}">{{ r.symbol }}</a></b></td><td class="m">{{ r.setup.replace('_',' ') }}</td><td>{{ r.entry_date }}</td><td>{{ r.closed_on }}</td>
+        <td class="num">{{ '%.2f'|format(r.entry_price) }}</td><td class="num">{{ '%.2f'|format(r.initial_stop) }}</td>
+        <td class="num {{ 'g' if (r.r_multiple or 0) > 0 else 'r' if r.r_multiple is not none else '' }}">{{ '%+.2f'|format(r.r_multiple) if r.r_multiple is not none else '–' }}</td>
+        <td class="num {{ 'g' if (r.pnl or 0) > 0 else 'r' if r.pnl is not none else '' }}">{{ '{:+,.0f}'.format(r.pnl) if r.pnl is not none else '–' }}</td>
+        <td class="m">{{ r.exit_reason or 'stop' }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <div class="empty">No closed trades yet.</div>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Last cycle log</h2>
+    {% if rep and rep.actions %}
+    <div class="actions">{% for a in rep.actions %}<div class="{{ 'g' if a.startswith('BUY') or a.startswith('FILL buy') else 'r' if a.startswith('CLOSED') or a.startswith('EXIT ') or a.startswith('SKIP') else 'b' if a.startswith('PLAN') or a.startswith('EXITS') or a.startswith('ARMED') else 'a' if a.startswith('RISK') or a.startswith('WARN') or a.startswith('HOLD') or a.startswith('LEARN') else '' }}">{{ a }}</div>{% endfor %}</div>
+    {% else %}
+    <div class="empty">Nothing happened in the last cycle.</div>
+    {% endif %}
+    {% if run.error %}<p class="r">Last manual cycle failed: {{ run.error }}</p>{% endif %}
+  </section>
+</main>
+{% endblock %}
+
+{% block footer %}
+  {{ settings.data }} · {{ settings.universe }} · state {{ settings.state_dir }}{% if rep %} · report {{ rep.generated_at[:19] }} UTC{% endif %}
+  · risk {{ '%.2f%%'|format(config.risk.risk_per_trade_pct * 100) }}/trade, max {{ config.risk.max_positions }} positions, stop {{ config.management.stop_adr_mult }}×ADR (≤{{ (config.management.max_stop_pct * 100)|int if config.management.max_stop_pct else 15 }}%), partial at +{{ config.management.partial_target_r }}R or day {{ config.management.partial_after_days }}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const run = document.getElementById('run');
+  if (run) run.addEventListener('click', async () => {
+    run.disabled = true; run.textContent = 'Cycle running…';
+    await fetch('/api/run', { method: 'POST' });
+    const poll = setInterval(async () => {
+      const s = await (await fetch('/api/snapshot')).json();
+      if (!s.run.running) { clearInterval(poll); location.reload(); }
+    }, 2000);
+  });
+  {% if run.running %}
+  setInterval(async () => { const s = await (await fetch('/api/snapshot')).json(); if (!s.run.running) location.reload(); }, 3000);
+  {% endif %}
+</script>
+{% endblock %}

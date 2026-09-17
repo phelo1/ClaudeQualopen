@@ -1,0 +1,86 @@
+# Starter scan universe: liquid US names that regularly show up in momentum
+# screens. Swap in your own list (one ticker per line). Kullamägi scans the
+# whole market; the tighter the list, the more setups you miss.
+
+# Semis / AI hardware
+NVDA
+AMD
+AVGO
+MRVL
+ARM
+SMCI
+MU
+TSM
+ALAB
+CRDO
+COHR
+ANET
+VRT
+
+# Software / internet
+PLTR
+APP
+CRWD
+NET
+DDOG
+SNOW
+MDB
+SHOP
+TTD
+HUBS
+ZS
+PANW
+DUOL
+RDDT
+HOOD
+COIN
+SOFI
+AFRM
+UPST
+MSTR
+IONQ
+RGTI
+QUBT
+
+# Consumer / growth
+TSLA
+RIVN
+CVNA
+CELH
+ELF
+DKNG
+RKLB
+ASTS
+LUNR
+ACHR
+JOBY
+OKLO
+SMR
+VST
+CEG
+NRG
+
+# Healthcare / biotech
+LLY
+NVO
+HIMS
+VKTX
+TMDX
+GH
+NTRA
+RXRX
+
+# Industrials / energy / materials
+GEV
+PWR
+FIX
+AXON
+ETN
+TLN
+URA
+CCJ
+FCX
+
+# Benchmarks (needed for the regime filter)
+QQQ
+SPY

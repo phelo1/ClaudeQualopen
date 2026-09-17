@@ -1,0 +1,314 @@
+{% extends "base.html" %}
+{% set active = 'learning' %}
+{% import "_macros.html" as m %}
+{% set lc = conn.connections|selectattr('name', 'equalto', 'learning')|first if conn and conn.connections else none %}
+{% set llm = conn.connections|selectattr('name', 'equalto', 'llm_learning')|first if conn and conn.connections else none %}
+{% set o = report.overall if report else none %}
+
+{% block head %}
+<style>
+  .lesson { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; display: grid; gap: 6px; border-left: 3px solid var(--border); }
+  .lesson.worked { border-left-color: var(--green); } .lesson.didnt { border-left-color: var(--red); }
+  .lesson.filter, .lesson.gate { border-left-color: var(--violet); } .lesson.revert { border-left-color: var(--amber); }
+  .lesson .k { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); display: flex; gap: 8px; }
+  .lesson .t { font-size: 13px; line-height: 1.5; }
+  .bucket table td, .bucket table th { padding: 4px 6px; font-size: 12px; }
+  .lift { font-variant-numeric: tabular-nums; font-weight: 700; }
+  .adj { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; display: grid; gap: 6px; border-left: 3px solid var(--amber); }
+  .adj .head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; } .adj .head b { font-size: 15px; }
+  .adj .arrow { font-variant-numeric: tabular-nums; padding: 2px 8px; border-radius: 8px; background: var(--panel); border: 1px solid var(--border); }
+  .pm { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; display: grid; gap: 8px; }
+  .pm .head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; } .pm .head b { font-size: 16px; } .pm .head b a { color: var(--text); }
+  .pm .r { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pm p { margin: 0; font-size: 13px; line-height: 1.5; }
+  .pm .ai { background: var(--panel); border-radius: 10px; padding: 10px 12px; border-left: 3px solid var(--violet); font-size: 13px; line-height: 1.5; }
+  .pm .ai h4 { margin: 6px 0 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); } .pm .ai h4:first-child { margin-top: 0; }
+  .tags { display: flex; gap: 6px; flex-wrap: wrap; } .tags span { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+  .knob { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; font-size: 12px; padding: 6px 0; border-bottom: 1px dashed var(--border); }
+  .knob .bar { grid-column: 1 / -1; height: 6px; border-radius: 3px; background: var(--panel-3); position: relative; }
+  .knob .bar i { position: absolute; top: -3px; width: 12px; height: 12px; border-radius: 50%; background: var(--blue); transform: translateX(-6px); }
+  .knob .bar i.learned { background: var(--amber); }
+  .disclaimer { font-size: 12px; color: var(--muted); border: 1px dashed var(--border); border-radius: 10px; padding: 10px 14px; line-height: 1.5; }
+  .g { color: var(--green); } .r { color: var(--red); }
+</style>
+{% endblock %}
+
+{% block header_pills %}
+  {% if report %}<span class="pill" title="generated {{ report.generated_at }}">review {{ report.generated_at[:10] }} · {{ report.trades }} trades</span>{% endif %}
+  <span class="pill {{ 'on' if en.mode == 'confirmed' else 'warn' if en.mode == 'resting' else '' }}" title="Entry trigger mode: {{ en.mode }}">entry · {{ en.mode }}</span>
+  {% if lc %}<span class="state {{ lc.state }}" title="{{ lc.note }}">learning · {{ lc.state|state_label }}</span>{% endif %}
+  {% if llm %}<span class="state {{ llm.state }}" title="{{ llm.note }}">AI coach · {{ llm.state|state_label }}</span>{% endif %}
+{% endblock %}
+
+{% block header_actions %}
+  <button id="run-learn" {% if run.running %}disabled{% endif %}>{{ 'Reviewing…' if run.running else 'Run learning review now' }}</button>
+  {% if learned %}<button id="reset-learn" class="ghost" title="Drop every learned adjustment; your settings apply again from the next cycle">Reset learned values</button>{% endif %}
+{% endblock %}
+
+{% block content %}
+<main>
+  {% if run.error %}<div class="flash err">Last manual review failed <span class="what">— {{ run.error }}</span></div>{% endif %}
+
+  <section class="col-8">
+    <h2>Learning from the journal <span class="m sub">what worked, what did not, and why — then one careful step at a time</span></h2>
+    <p class="m">This is a research review of selection thresholds, not model training. The rules generate hypotheses; the AI coach explains them. Neither proves an edge.</p>
+    <div class="evidence-callout"><b>{{ 'Restricted auto-application enabled' if ln.auto_apply else 'Proposal-only mode' }}</b><p>Paper fills, estimated exits and shadow trades are exploratory evidence. Automatic changes require at least 30 fresh, broker-verified executions in the affected band, a negative upper confidence bound, and an explicit opt-in. Only one tightening can be applied per review. Shadow-based loosenings and reversions remain proposals.</p></div>
+    {% if report and report.evidence %}<div class="stats"><div class="stat"><div class="k">Broker-verified records</div><div class="v">{{ report.evidence.verified }}</div></div><div class="stat"><div class="k">Exploratory records</div><div class="v">{{ report.evidence.other }}</div></div></div>{% endif %}
+    {% if report %}
+    <div class="stats">
+      <div class="stat"><div class="k">Closed trades</div><div class="v">{{ report.trades }}</div></div>
+      <div class="stat"><div class="k">Win rate</div><div class="v">{{ '%.0f%%'|format(o.win_rate * 100) if o.win_rate is not none else '–' }}</div></div>
+      <div class="stat"><div class="k">Avg R</div><div class="v {{ 'g' if (o.avg_r or 0) > 0 else 'r' if o.avg_r is not none else '' }}">{{ '%+.2f'|format(o.avg_r) if o.avg_r is not none else '–' }}</div></div>
+      <div class="stat"><div class="k">Profit factor</div><div class="v">{{ '%.2f'|format(o.profit_factor) if o.profit_factor is not none else ('no losses' if o.n and o.win_rate == 1.0 else '–') }}</div></div>
+      <div class="stat"><div class="k">Shadow trades</div><div class="v sm">{{ report.shadows.total or 0 }} <span class="m" style="font-size:11px">{% for k, v in (report.shadows.by_status or {}).items() %}{{ k }} {{ v }}{{ ' · ' if not loop.last }}{% endfor %}</span></div></div>
+      <div class="stat"><div class="k">Adjustments</div><div class="v {{ 'a' if report.adjustments else '' }}">{{ report.adjustments|length }} <span class="m" style="font-size:11px">proposed · {{ report.applied|length if report.applied else 0 }} applied</span>{% if report.reverted %} <span class="r" style="font-size:11px">· {{ report.reverted|length }} reverted</span>{% endif %}</div></div>
+    </div>
+    {% set ob = report.objective %}
+    {% if ob and ob.trades %}
+    <div class="stats" style="margin-top:10px">
+      <div class="stat"><div class="k">Total R</div><div class="v {{ 'g' if ob.total_r > 0 else 'r' if ob.total_r < 0 else '' }}">{{ '%+.1f'|format(ob.total_r) }}</div></div>
+      <div class="stat"><div class="k">R per week</div><div class="v {{ 'g' if (ob.r_per_week or 0) > 0 else 'r' if ob.r_per_week is not none and ob.r_per_week < 0 else '' }}">{{ '%+.2f'|format(ob.r_per_week) if ob.r_per_week is not none else '–' }}</div></div>
+      <div class="stat"><div class="k">Trades per week</div><div class="v">{{ '%.1f'|format(ob.trades_per_week) if ob.trades_per_week is not none else '–' }}</div></div>
+      <div class="stat"><div class="k">Left on the table{{ m.info("What the setups blocked by a check, gate or detector threshold would have made in total, measured on real bars afterwards (counterfactual).") }}</div><div class="v {{ 'a' if ob.filtered_total_r > 0 else '' }}">{{ '%+.1f'|format(ob.filtered_total_r) }}R <span class="m" style="font-size:11px">{{ ob.filtered_n }} blocked</span></div></div>
+    </div>
+    <p class="m" style="font-size:12px; margin:8px 0 0">{{ ob.note }}</p>
+    {% endif %}
+    {{ m.gaps_box(report.data_gaps, 'Notes — nothing was substituted') }}
+    {% else %}
+    <div class="empty">No review yet. It runs automatically on {{ ln.review_weekday|capitalize }} at {{ ln.review_time }} NY when the daemon is up, or click <b>Run learning review now</b>. With {{ closed_total }} closed trade{{ 's' if closed_total != 1 }} in the journal{% if closed_total < ln.min_trades %} it will collect observations; {{ ln.min_trades }} records are needed to consider a research proposal{% endif %}.</div>
+    {% endif %}
+  </section>
+
+  <section class="col-4">
+    <h2>Guard rails</h2>
+    <div class="disclaimer">
+      These are observational comparisons, not causal effects. Shadow outcomes use a simplified fill model and cannot authorize changes. Applied tightenings require fresh verified evidence; the same historical trades cannot be reused after a change. At most one knob moves per review, inside its declared bounds and outside its cooldown.
+      {% if not ln.auto_apply %}<br><br>Auto-apply is <b>off</b>: adjustments are proposed only. Turn it on in <a href="/settings">settings → Learning</a>.{% endif %}
+    </div>
+    <h2 style="margin-top:14px">Knobs the review may move</h2>
+    {% for k in knobs %}
+    {% set span = k.hi - k.lo %}
+    <div class="knob">
+      <span>{{ k.label }}{{ m.info(k.help) }} <span class="m">{{ k.key }}</span></span>
+      <b class="{{ 'a' if k.key in learned else '' }}">{{ '%g'|format(k.current) }}</b>
+      <div class="bar" data-tip="Guard rails: the review may move this knob between {{ '%g'|format(k.lo) }} and {{ '%g'|format(k.hi) }}, one step of {{ '%g'|format(k.step) }} per review."><i class="{{ 'learned' if k.key in learned else '' }}" style="left: {{ (((k.current - k.lo) / span) * 100)|round(1) if span else 0 }}%"></i></div>
+    </div>
+    {% endfor %}
+    <p class="m" style="font-size:11px; margin:8px 0 0">Blue = your setting · amber = learned value in force.</p>
+  </section>
+
+  {% if report %}
+  <section class="col-6">
+    <h2>Lessons <span class="count">{{ report.lessons|length }}</span> <span class="m sub">plain English, evidence attached</span></h2>
+    {% if report.lessons %}
+    <div class="cards2" style="grid-template-columns: 1fr">
+      {% for l in report.lessons[:16] %}
+      <div class="lesson {{ l.kind }}">
+        <div class="k"><span>{{ {'worked': 'worked', 'didnt': 'did not work', 'filter': 'filter check', 'gate': 'entry gate', 'revert': 'reverted'}.get(l.kind, l.kind) }}</span><span>{{ l.n }} {{ 'trades' if l.kind in ('worked', 'didnt') else 'shadows' }}</span>{% if l.avg_r is not none %}<span class="{{ 'g' if l.avg_r > 0 else 'r' }}">avg {{ '%+.2f'|format(l.avg_r) }}R</span>{% endif %}{% if l.lift %}<span class="lift {{ 'g' if l.lift > 0 else 'r' }}">lift {{ '%+.2f'|format(l.lift) }}R</span>{% endif %}</div>
+        <div class="t">{{ l.text }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No lesson clears the evidence bar yet ({{ report.trades }} closed trades; buckets need ≥ 3 trades and a {{ '%g'|format(ln.min_lift_r) }}R lift).</div>
+    {% endif %}
+  </section>
+
+  <section class="col-6">
+    <h2>Adjustments <span class="count">{{ report.adjustments|length }}</span> <span class="m sub">research proposals · {{ report.applied|length if report.applied else 0 }} applied after evidence checks</span></h2>
+    {% if report.adjustments %}
+    <div class="cards2" style="grid-template-columns: 1fr">
+      {% for a in report.adjustments %}
+      <div class="adj">
+        <div class="head"><b>{{ a.label }}</b><span class="arrow">{{ '%g'|format(a['from']) }} → {{ '%g'|format(a.to) }}</span><span class="tag">{{ a.direction }}</span><span class="m" style="font-size:12px">{{ a.n }} {{ 'trades' if a.direction == 'tighten' else 'shadows' }} · avg {{ '%+.2f'|format(a.avg_r) }}R</span></div>
+        <div style="font-size:13px; line-height:1.5">{{ a.reason }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No knob moved: {% if report.status == 'insufficient' %}fewer than {{ ln.min_trades }} closed trades{% else %}no marginal band or blocked-shadow group cleared the {{ '%g'|format(ln.min_lift_r) }}R bar{% endif %}.</div>
+    {% endif %}
+    <h2 style="margin-top:14px">Learned values in force <span class="count">{{ report.active_overrides|length }}</span> <span class="m sub">each one is scored on what happened after it</span></h2>
+    {% if report.active_overrides %}
+    <div class="table-wrap"><table>
+      <tr><th>Knob</th><th class="num">Value</th><th>Scorecard</th><th>History</th></tr>
+      {% for k, v in report.active_overrides.items() %}
+      {% set sc = report.scorecards|selectattr('key', 'equalto', k)|first %}
+      <tr>
+        <td>{{ v.label }} <span class="m">{{ k }}</span></td>
+        <td class="num a">{{ '%g'|format(v.value) }}</td>
+        <td class="wrap" style="font-size:12px">
+          {% if sc %}<span class="state {{ 'ok' if sc.verdict == 'helping' else 'error' if sc.verdict == 'hurting' else 'degraded' if sc.verdict == 'neutral' else 'unknown' }}">{{ sc.verdict|upper }}</span>
+          <div class="m" style="margin-top:4px">{{ sc.note }}{% if sc.evidence_label and sc.evidence.n %} — {{ sc.evidence_label }}: {{ sc.evidence.n }}, {{ '%+.2f'|format(sc.evidence.avg_r) }}R avg{% endif %} · {{ sc.days_active }} days in force · book since: {{ sc.real_after.n }} trades{% if sc.real_after.avg_r is not none %}, {{ '%+.2f'|format(sc.real_after.avg_r) }}R avg{% endif %}</div>
+          {% else %}<span class="m">–</span>{% endif %}
+        </td>
+        <td class="wrap" style="font-size:12px">{% for h in v.history %}<div><span class="m">{{ h.date }}</span> {{ '%g'|format(h['from']) }} → {{ '%g'|format(h.to) }} ({{ h.direction }}{% if h.n %}, {{ h.n }} · {{ '%+.2f'|format(h.avg_r or 0) }}R{% endif %})</div>{% endfor %}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    <p class="m" style="font-size:11px; margin:8px 0 0">HURTING = an exploratory comparison suggests reviewing the change; it does not automatically revert a setting. PENDING = not enough trades or shadows yet to judge it.</p>
+    {% else %}
+    <p class="m" style="font-size:12px">No active overrides. Scorecards appear after a bounded change is recorded.</p>
+    {% endif %}
+  </section>
+
+  <section class="col-6">
+    <h2>Best trades we did not take <span class="count">{{ report.shadows.missed|length if report.shadows.missed else 0 }}</span> <span class="m sub">should we have taken them, and why did they work?</span></h2>
+    {% if report.shadows.missed %}
+    <div class="table-wrap"><table>
+      <tr><th>Date</th><th>Symbol</th><th>Kept out as</th><th>By</th><th class="num">Would-be R</th><th>Why it worked</th></tr>
+      {% for s in report.shadows.missed %}
+      <tr><td class="m">{{ s.date }}</td><td><b><a href="/symbol/{{ s.symbol }}">{{ s.symbol }}</a></b></td><td class="m">{{ s.kind|replace('_', ' ') }}</td><td class="wrap" style="font-size:12px">{{ s.blocked_by|join('; ') }}</td><td class="num g">{{ '%+.2f'|format(s.r_multiple) }}</td><td class="wrap" style="font-size:12px">{{ s.lesson }}</td></tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <div class="empty">No resolved shadow trade has made money yet.</div>
+    {% endif %}
+  </section>
+
+  <section class="col-6">
+    <h2>Worst trades we dodged <span class="count">{{ report.shadows.avoided|length if report.shadows.avoided else 0 }}</span> <span class="m sub">the filters earning their keep, and what the losers had in common</span></h2>
+    {% if report.shadows.avoided %}
+    <div class="table-wrap"><table>
+      <tr><th>Date</th><th>Symbol</th><th>Kept out as</th><th>By</th><th class="num">Would-be R</th><th>Why it failed</th></tr>
+      {% for s in report.shadows.avoided %}
+      <tr><td class="m">{{ s.date }}</td><td><b><a href="/symbol/{{ s.symbol }}">{{ s.symbol }}</a></b></td><td class="m">{{ s.kind|replace('_', ' ') }}</td><td class="wrap" style="font-size:12px">{{ s.blocked_by|join('; ') }}</td><td class="num r">{{ '%+.2f'|format(s.r_multiple) }}</td><td class="wrap" style="font-size:12px">{{ s.lesson }}</td></tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <div class="empty">No resolved shadow trade has lost money yet.</div>
+    {% endif %}
+  </section>
+
+  <section class="col-6">
+    <h2>Filters and gates <span class="m sub">scored on the shadow trades they blocked</span></h2>
+    {% if report.filters or report.gates %}
+    <div class="table-wrap"><table>
+      <tr><th>Check / gate</th><th class="num">Blocked</th><th class="num">Alone</th><th class="num">Resolved</th><th class="num">Would-be avg R</th><th>Verdict</th></tr>
+      {% for k, f in report.filters.items() %}
+      <tr><td>check <b>{{ k }}</b></td><td class="num">{{ f.blocked }}</td><td class="num">{{ f.sole_blocker }}</td><td class="num">{{ f.sole.n }}</td><td class="num {{ 'g' if (f.sole.avg_r or 0) > 0 else 'r' if f.sole.avg_r is not none else '' }}">{{ '%+.2f'|format(f.sole.avg_r) if f.sole.avg_r is not none else '–' }}</td><td class="wrap" style="font-size:12px">{{ f.verdict }}</td></tr>
+      {% endfor %}
+      {% for k, g in report.gates.items() %}
+      <tr><td>gate <b>{{ k|replace('_', ' ') }}</b></td><td class="num">{{ g.held }}</td><td class="num">{{ g.sole }}</td><td class="num">{{ g.sole_only.n }}</td><td class="num {{ 'g' if (g.sole_only.avg_r or 0) > 0 else 'r' if g.sole_only.avg_r is not none else '' }}">{{ '%+.2f'|format(g.sole_only.avg_r) if g.sole_only.avg_r is not none else '–' }}</td><td class="wrap" style="font-size:12px">{{ g.verdict }}</td></tr>
+      {% endfor %}
+    </table></div>
+    <p class="m" style="font-size:12px; margin:8px 0 0">{{ report.shadows.note }}</p>
+    {% else %}
+    <div class="empty">No shadow trades yet. They appear as soon as a scan rejects or holds back a setup.</div>
+    {% endif %}
+  </section>
+
+  <section class="col-6">
+    <h2>Post-mortem tags <span class="m sub">how often each condition showed up, and how those trades did</span></h2>
+    {% if report.tags %}
+    <div class="table-wrap"><table>
+      <tr><th>Tag</th><th class="num">Trades</th><th class="num">Win rate</th><th class="num">Avg R</th></tr>
+      {% for t, s in report.tags.items() %}
+      <tr><td>{{ t|replace('_', ' ') }}</td><td class="num">{{ s.n }}</td><td class="num">{{ '%.0f%%'|format(s.win_rate * 100) if s.win_rate is not none else '–' }}</td><td class="num {{ 'g' if (s.avg_r or 0) > 0 else 'r' }}">{{ '%+.2f'|format(s.avg_r) if s.avg_r is not none else '–' }}</td></tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <div class="empty">No closed trades yet.</div>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>By entry condition <span class="m sub">every bucket, with its lift over the book (small-sample adjusted)</span></h2>
+    {% if report.buckets %}
+    <div class="cards2" style="grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))">
+      {% for b in report.buckets %}
+      <div class="bucket">
+        <div class="m" style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:4px">{{ b.label }}</div>
+        <div class="table-wrap"><table>
+          <tr><th>Bucket</th><th class="num">n</th><th class="num">Win</th><th class="num">Avg R</th><th class="num">Lift</th></tr>
+          {% for r in b.rows %}
+          <tr><td>{{ r.bucket }}</td><td class="num">{{ r.n }}</td><td class="num">{{ '%.0f%%'|format(r.win_rate * 100) }}</td><td class="num">{{ '%+.2f'|format(r.avg_r) }}</td><td class="num lift {{ 'g' if r.lift > 0.05 else 'r' if r.lift < -0.05 else 'm' }}">{{ '%+.2f'|format(r.lift) }}</td></tr>
+          {% endfor %}
+        </table></div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No closed trades yet.</div>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Post-mortems <span class="count">{{ report.post_mortems|length }}</span> <span class="m sub">most recent first{% if report.ai and report.ai.enabled %} · AI coach {{ report.ai.provider or '' }}{% if report.ai.error %} — <span class="r">{{ report.ai.error }}</span>{% endif %}{% endif %}</span></h2>
+    {% if report.post_mortems %}
+    <div class="cards2" style="grid-template-columns: repeat(auto-fill, minmax(420px, 1fr))">
+      {% for p in report.post_mortems %}
+      <div class="pm">
+        <div class="head">
+          <span class="r {{ 'g' if (p.r_multiple or 0) > 0 else 'r' }}">{{ '%+.2f'|format(p.r_multiple) }}R</span>
+          <b><a href="/symbol/{{ p.symbol }}">{{ p.symbol }}</a></b>
+          <span class="m">{{ p.setup }} · {{ p.entry_mode or '?' }} · {{ p.entry_date }} → {{ p.closed_on }} · {{ p.exit_reason }}</span>
+          <span class="m" style="margin-left:auto; font-size:12px" title="maximum favourable / adverse excursion while open">MFE {{ '%+.1f'|format(p.mfe_r or 0) }}R · MAE {{ '%+.1f'|format(p.mae_r or 0) }}R</span>
+        </div>
+        {% if p.post_mortem %}
+        <p>{{ p.post_mortem.text }}</p>
+        <div class="tags">{% for t in p.post_mortem.tags %}<span>{{ t|replace('_', ' ') }}</span>{% endfor %}</div>
+        {% endif %}
+        {% if p.post_mortem_ai %}
+        <div class="ai">
+          <h4>AI coach — what worked</h4><p>{{ p.post_mortem_ai.what_worked }}</p>
+          <h4>What failed</h4><p>{{ p.post_mortem_ai.what_failed }}</p>
+          <h4>Lesson</h4><p>{{ p.post_mortem_ai.lesson }}</p>
+          <p class="m" style="font-size:11px; margin-top:6px">{{ p.post_mortem_ai.model }} · confidence {{ '%.0f%%'|format(p.post_mortem_ai.confidence * 100) }} · reasons only from the stored numbers</p>
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No closed trades yet.</div>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <section>
+    <h2>Shadow trades <span class="count">{{ shadows|length }}</span> <span class="m sub">setups seen but not taken, resolved against real bars — counterfactuals, not P&amp;L</span></h2>
+    {% if shadows %}
+    <div class="table-wrap"><table>
+      <tr><th>Date</th><th>Symbol</th><th>Kind</th><th>Why not taken</th><th class="num">Entry</th><th class="num">Stop</th><th>Status</th><th class="num">Would-be R</th><th>Exit</th></tr>
+      {% for s in shadows %}
+      <tr>
+        <td class="m">{{ s.date }}</td>
+        <td><b><a href="/symbol/{{ s.symbol }}">{{ s.symbol }}</a></b></td>
+        <td class="m">{{ s.kind|replace('_', ' ') }}</td>
+        <td class="wrap" style="font-size:12px">{{ (s.failed_checks|join(', ')) if s.failed_checks else (s.reasons|join('; ')) }}{% if s.get('post_mortem') and s.post_mortem.lesson %}<div class="m">{{ s.post_mortem.lesson }}</div>{% endif %}</td>
+        <td class="num">{{ '%.2f'|format(s.entry) }}</td>
+        <td class="num r">{{ '%.2f'|format(s.stop) }}</td>
+        <td class="m">{{ s.status }}</td>
+        <td class="num {{ 'g' if (s.get('r_multiple') or 0) > 0 else 'r' if s.get('r_multiple') is not none else '' }}">{{ '%+.2f'|format(s.r_multiple) if s.get('r_multiple') is not none else '–' }}</td>
+        <td class="m">{{ s.get('exit_reason') or s.get('note') or '' }}{% if s.get('exited_on') %} {{ s.exited_on }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <div class="empty">None yet. The first scan that rejects, holds back or arms a setup starts the ledger.</div>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const btn = document.getElementById('run-learn');
+  if (btn) btn.addEventListener('click', async () => {
+    btn.disabled = true; btn.textContent = 'Reviewing…';
+    await fetch('/api/learning/run', { method: 'POST' });
+    const poll = setInterval(async () => {
+      const r = await (await fetch('/api/learning')).json();
+      if (!r.run.running) { clearInterval(poll); location.reload(); }
+    }, 3000);
+  });
+  const rst = document.getElementById('reset-learn');
+  if (rst) rst.addEventListener('click', async () => {
+    if (!confirm('Drop every learned adjustment? Your settings apply again from the next cycle.')) return;
+    rst.disabled = true;
+    await fetch('/api/learning/reset', { method: 'POST' });
+    location.reload();
+  });
+</script>
+{% endblock %}

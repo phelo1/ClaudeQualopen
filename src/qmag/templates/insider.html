@@ -1,0 +1,284 @@
+{% extends "base.html" %}
+{% set active = 'insider' %}
+{% import "_macros.html" as m %}
+{% set uw = conn.connections|selectattr('name', 'equalto', 'insider_scan')|first if conn and conn.connections else none %}
+{% set llm = conn.connections|selectattr('name', 'equalto', 'llm_insider')|first if conn and conn.connections else none %}
+
+{% block head %}
+<style>
+  .flag { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; display: grid; gap: 10px; }
+  .flag .head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .flag .head b { font-size: 20px; } .flag .head b a { color: var(--text); }
+  .score { font-size: 22px; font-weight: 700; padding: 2px 10px; border-radius: 8px; background: var(--panel); border: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  .score.hot { color: var(--red); border-color: rgba(239,68,68,.5); } .score.warm { color: var(--amber); border-color: rgba(245,158,11,.5); }
+  .dir.bullish { color: var(--green); } .dir.bearish { color: var(--red); } .dir.mixed { color: var(--muted); }
+  .verdict-tag { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); }
+  .verdict-tag.investigate { color: var(--red); border-color: rgba(239,68,68,.5); background: rgba(239,68,68,.08); }
+  .verdict-tag.likely_explained { color: var(--amber); border-color: rgba(245,158,11,.5); background: rgba(245,158,11,.08); }
+  .verdict-tag.noise { color: var(--muted); }
+  .breakdown { display: flex; gap: 6px; flex-wrap: wrap; }
+  .breakdown span { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+  .breakdown span b { color: var(--text); margin-left: 4px; }
+  .ai { background: var(--panel); border-radius: 10px; padding: 12px 14px; border-left: 3px solid var(--violet); font-size: 13px; line-height: 1.5; }
+  .ai h4 { margin: 8px 0 3px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .ai h4:first-child { margin-top: 0; }
+  .ai p { margin: 0; }
+  .ai .err { color: #fca5a5; }
+  .cat { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 13px; }
+  .cat .lk { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; padding: 1px 6px; border-radius: 4px; background: var(--panel-3); align-self: start; margin-top: 3px; }
+  .cat .lk.high { color: var(--red); } .cat .lk.medium { color: var(--amber); } .cat .lk.low { color: var(--muted); }
+  .flag table td, .flag table th { padding: 4px 6px; font-size: 12px; }
+  .disclaimer { font-size: 12px; color: var(--muted); border: 1px dashed var(--border); border-radius: 10px; padding: 10px 14px; line-height: 1.5; }
+  .hl { font-size: 12px; } .hl div { padding: 3px 0; border-bottom: 1px dashed var(--border); } .hl .m { margin-right: 6px; }
+</style>
+{% endblock %}
+
+{% block header_pills %}
+  {% if scan %}<span class="pill" title="generated {{ scan.generated_at }}">week {{ scan.week_start }} → {{ scan.week_end }}</span>{% endif %}
+  {% if uw %}<span class="state {{ uw.state }}" title="{{ uw.note }}">Unusual Whales · {{ uw.state|state_label }}</span>{% endif %}
+  {% if llm %}<span class="state {{ llm.state }}" title="{{ llm.note }}">AI analyst · {{ llm.state|state_label }}</span>{% endif %}
+{% endblock %}
+
+{% block header_actions %}
+  <button id="run-insider" {% if run.running %}disabled{% endif %}>{{ 'Scanning…' if run.running else 'Run insider scan now' }}</button>
+{% endblock %}
+
+{% block content %}
+<main>
+  {% if run.error %}<div class="flash err">Last manual scan failed <span class="what">— {{ run.error }}</span></div>{% endif %}
+
+  <section class="col-8">
+    <h2>Saturday unusual-options scan <span class="m sub">who took an unusual risk this week, and what might they know?</span></h2>
+    <p class="m" style="margin:0 0 12px; font-size:13px; line-height:1.55">
+      Every <b>{{ ins.weekday|capitalize }} at {{ ins.run_time }} New York</b> the daemon reviews the last {{ ins.lookback_days }} days of market-wide options flow from Unusual Whales:
+      flow alerts with at least ${{ '{:,.0f}'.format(ins.min_premium) }} premium, volume ≥ {{ '%g'|format(ins.min_volume_oi_ratio) }}× open interest, ≥ {{ '%g'|format(ins.min_otm_pct) }}% out of the money,
+      ≤ {{ ins.max_dte }} days to expiry and ≥ {{ '%.0f%%'|format(ins.min_ask_side_pct * 100) }} filled at the ask{% if ins.contract_screen %}, plus each session's unusual-contract screen{% endif %}.
+      Index and ETF products are excluded. Each ticker's week is scored 0–10 for size, distance, urgency, conviction and whether the contracts expire <i>before</i> the next scheduled earnings;
+      tickers scoring ≥ {{ '%g'|format(ins.min_flag_score) }} are flagged{% if ins.ai_enabled %} and handed to the AI analyst with the public context (headlines, earnings date, insider filings) for a strict-JSON read of the likely catalyst and what the buyer is speculating on{% endif %}.
+    </p>
+    {% if scan %}
+    <div class="stats">
+      <div class="stat"><div class="k">Flagged</div><div class="v {{ 'r' if scan.flagged|length else '' }}">{{ scan.flagged|length }}</div></div>
+      <div class="stat"><div class="k">Tickers with unusual flow</div><div class="v">{{ scan.tickers_considered }}</div></div>
+      <div class="stat"><div class="k">Alerts reviewed</div><div class="v">{{ '{:,}'.format(scan.alerts_considered or 0) }}</div></div>
+      <div class="stat"><div class="k">Unusual contracts</div><div class="v">{{ '{:,}'.format(scan.contracts_considered or 0) }}</div></div>
+      <div class="stat"><div class="k">API calls</div><div class="v">{{ scan.calls }}</div></div>
+      <div class="stat"><div class="k">AI analyses</div><div class="v sm">{% if scan.ai and scan.ai.enabled %}{{ scan.ai.analysed - scan.ai.errors }}/{{ scan.ai.analysed }} <span class="m" style="font-size:11px">{{ scan.ai.provider }}</span>{% else %}<span class="m">off</span>{% endif %}</div></div>
+    </div>
+    {% if scan.unavailable %}
+    <div class="gaps" style="margin-top:12px"><b>SCAN NOT RUN — options data unavailable</b><ul>{% for g in scan.data_gaps %}<li>{{ g }}</li>{% endfor %}</ul></div>
+    {% else %}
+    {{ m.gaps_box(scan.data_gaps, 'Data that could not be sourced for this scan — nothing was substituted') }}
+    {% endif %}
+    {% else %}
+    <div class="empty">No scan yet. It runs automatically on {{ ins.weekday|capitalize }} at {{ ins.run_time }} NY when the daemon is up, or click <b>Run insider scan now</b>.</div>
+    {% endif %}
+  </section>
+
+  <section class="col-4">
+    <h2>How to read a flag</h2>
+    <div class="disclaimer">
+      A flag is a <b>research lead, not an accusation</b>. Unusual, aggressive, short-dated, out-of-the-money positioning that expires before any scheduled event is <i>consistent with</i> someone acting on information the market does not have — it is also consistent with a hedge, a fund rolling a position, or a wrong guess.
+      The AI reads only the facts shown here and is instructed to prefer the boring explanation whenever public information supplies one. Use <b>what to check</b> as the to-do list before drawing any conclusion.
+    </div>
+    {% set oc = scan.get('outcomes') if scan else none %}
+    {% if oc and oc.flags %}
+    <h2 style="margin-top:14px">Scorecard <span class="m sub">did flagged stocks move the way the options said?</span></h2>
+    <div class="stats">
+      <div class="stat"><div class="k">Flags measured</div><div class="v">{{ oc.measured }}<span class="m" style="font-size:12px">/{{ oc.flags }}</span></div></div>
+      <div class="stat"><div class="k">Moved ≥10% in {{ oc.sessions }} sessions</div><div class="v {{ 'g' if oc.hit_10 else '' }}">{{ oc.hit_10 }}</div></div>
+      <div class="stat"><div class="k">Moved ≥20%</div><div class="v {{ 'g' if oc.hit_20 else '' }}">{{ oc.hit_20 }}</div></div>
+      <div class="stat"><div class="k">Avg best move</div><div class="v">{% if oc.avg_best_move_pct is not none %}{{ '%+.1f%%'|format(oc.avg_best_move_pct) }}{% else %}<span class="m">n/a</span>{% endif %}</div></div>
+    </div>
+    <p class="m" style="font-size:12px; margin:8px 0 0">Best move in the bet's direction from the first close after the scan week over the next {{ oc.sessions }} sessions. {{ oc.done }} of {{ oc.measured }} measured flags have completed the window; {{ oc.flags - oc.measured }} could not be measured (no daily bars) and are not counted.</p>
+    {% endif %}
+    {% if scan and scan.history and scan.history|length > 1 %}
+    <h2 style="margin-top:14px">Previous weeks</h2>
+    <div class="table-wrap"><table>
+      <tr><th>Week ending</th><th class="num">Alerts</th><th class="num">Tickers</th><th>Flagged <span class="m" style="font-weight:400">· best move since</span></th></tr>
+      {% for h in scan.history|reverse %}{% if not loop.first %}
+      <tr><td>{{ h.week_end }}</td><td class="num">{{ h.alerts }}</td><td class="num">{{ h.tickers_considered }}</td><td class="wrap">{% for f in h.flagged %}{% set o = f.get('outcome') %}<span class="chip {{ 'r' if f.verdict == 'investigate' else '' }}" title="{{ f.direction }} · score {{ '%.1f'|format(f.score) }}{% if o %} · from ${{ o.entry }} on {{ o.entry_date }}, {{ o.sessions }} sessions{% endif %}">{{ f.ticker }} {{ '%.1f'|format(f.score) }}{% if o %} <b class="{{ 'g' if o.best_move_pct >= 10 else 'm' }}">{{ '%+.0f%%'|format(o.best_move_pct) }}</b>{% endif %}</span>{% else %}<span class="m">none</span>{% endfor %}</td></tr>
+      {% endif %}{% endfor %}
+    </table></div>
+    {% endif %}
+  </section>
+
+  {% if scan and not scan.unavailable %}
+  <section>
+    <h2>Flagged for investigation <span class="count">{{ scan.flagged|length }}</span> <span class="m sub">ranked by unusualness score</span></h2>
+    {% if scan.flagged %}
+    <div class="cards2" style="grid-template-columns: repeat(auto-fill, minmax(460px, 1fr))">
+      {% for f in scan.flagged %}
+      {% set ai = f.ai %}
+      <div class="flag">
+        <div class="head">
+          <span class="score {{ 'hot' if f.score >= 7 else 'warm' if f.score >= 5.5 else '' }}" title="unusualness 0–10">{{ '%.1f'|format(f.score) }}</span>
+          <b><a href="/symbol/{{ f.ticker }}">{{ f.ticker }}</a></b>
+          <span class="dir {{ f.direction }}" style="font-weight:700; text-transform:uppercase; font-size:12px; letter-spacing:.06em">{{ f.direction }}</span>
+          {% if ai and ai.verdict %}<span class="verdict-tag {{ ai.verdict }}" title="AI verdict · suspicion {{ '%.0f%%'|format(ai.suspicion * 100) }}">{{ ai.verdict|replace('_', ' ') }} · {{ '%.0f%%'|format(ai.suspicion * 100) }}</span>{% endif %}
+          <span class="m" style="font-size:12px; margin-left:auto">{{ f.sector or (f.context.sector if f.context else '') or '' }}{% if f.context and f.context.market_cap %} · ${{ '%.1f'|format(f.context.market_cap / 1e9) }}B{% endif %}</span>
+        </div>
+        <div class="ctx compact">
+          <div><div class="k">Premium this week</div><div class="v">${{ '{:,.0f}'.format(f.premium_total) }}</div></div>
+          <div><div class="k">Bull / bear $</div><div class="v"><span class="g">${{ '{:,.0f}'.format(f.bull_premium / 1000) }}k</span> / <span class="r">${{ '{:,.0f}'.format(f.bear_premium / 1000) }}k</span></div></div>
+          <div><div class="k">Alerts · days</div><div class="v">{{ f.alerts }} · {{ f.days_active|length }}</div></div>
+          <div><div class="k">Max vol / OI</div><div class="v">{{ '%.1f'|format(f.max_vol_oi) }}×</div></div>
+          <div><div class="k">Max OTM</div><div class="v">{{ '%.0f%%'|format(f.max_otm_pct) }}</div></div>
+          <div><div class="k">Nearest expiry</div><div class="v">{{ f.earliest_expiry or '–' }}{% if f.min_dte is not none %} <span class="m" style="font-size:11px">{{ f.min_dte }}d</span>{% endif %}</div></div>
+          {% if f.get('cluster') %}<div><div class="k">The bet</div><div class="v sm">{{ f.cluster.type }} {{ '%g'|format(f.cluster.strike or 0) }} · {{ f.cluster.expiry }}{% if f.cluster.otm_pct is not none %} · {{ '%.0f%%'|format(f.cluster.otm_pct) }} OTM{% endif %} <span class="m" style="font-size:11px">{{ '%.0f%%'|format(f.cluster.share * 100) }} of premium</span></div></div>{% endif %}
+          <div><div class="k">Chain vol vs 30d</div><div class="v">{% if f.get('volume_surge') is not none %}{{ '%.0f'|format(f.volume_surge) }}×{% else %}<span class="m" title="{{ f.get('volume_note') or 'volume history not read' }}">n/a</span>{% endif %}</div></div>
+          {% if f.get('market_cap') %}<div><div class="k">Market cap</div><div class="v">${{ '%.1f'|format(f.market_cap / 1e9) }}B</div></div>{% endif %}
+        </div>
+        {% set st = f.get('stock') %}
+        {% if st %}
+        <div class="m" style="font-size:12px" title="the share price when the options were bought (closing {{ st.asof }})">
+          <b style="color:var(--text-2)">Stock before the bet:</b>
+          {{ '%+.1f%%'|format(st.ret_5d_pct) }} over the prior 5 sessions
+          {% if st.volume_ratio is not none %}· {{ '%.1f'|format(st.volume_ratio) }}× normal share volume{% endif %}
+          · 52-week range ${{ '%g'|format(st.low_52w) }}–${{ '%g'|format(st.high_52w) }}
+          {% if st.strike_beyond_52w %}· <span class="r" style="font-weight:600">strike is beyond the 52-week range</span>{% endif %}
+        </div>
+        {% elif f.get('stock_note') %}
+        <div class="m" style="font-size:12px">{{ f.stock_note }}</div>
+        {% endif %}
+        <div class="breakdown" title="score components">
+          {% for k, v in f.breakdown.items() %}<span>{{ k|replace('_', ' ') }}<b class="{{ 'g' if v > 0 else 'r' if v < 0 else 'm' }}">{{ '%+.1f'|format(v) }}</b></span>{% endfor %}
+        </div>
+        <div class="m" style="font-size:12px">{{ f.earnings_note }}{% if f.context and f.context.earnings_date %} · next earnings {{ f.context.earnings_date }}{% endif %}</div>
+
+        {% if ai %}
+        <div class="ai">
+          {% if ai.error %}
+          <p class="err">AI analysis unavailable — {{ ai.error }}. The flag stands on the options data alone.</p>
+          {% else %}
+          <h4>Summary</h4><p>{{ ai.summary }}</p>
+          <h4>What the buyer is speculating on</h4><p>{{ ai.speculating_on }}</p>
+          {% if ai.possible_catalysts %}
+          <h4>Possible catalysts</h4>
+          <div class="cat">{% for c in ai.possible_catalysts %}<span class="lk {{ c.likelihood }}">{{ c.likelihood }}</span><span><b>{{ c.catalyst }}</b>{% if c.basis %} <span class="m">— {{ c.basis }}</span>{% endif %}</span>{% endfor %}</div>
+          {% endif %}
+          <h4>Explained by public information?</h4><p>{{ 'Yes — the headlines / calendar in the bundle account for the trades.' if ai.explained_by_public_info else 'No — nothing in the gathered public context explains this positioning.' }}</p>
+          {% if ai.what_to_check %}<h4>What to check</h4><ul class="tight">{% for w in ai.what_to_check %}<li>{{ w }}</li>{% endfor %}</ul>{% endif %}
+          {% if ai.risks %}<h4>Ways this read could be wrong</h4><ul class="tight">{% for w in ai.risks %}<li>{{ w }}</li>{% endfor %}</ul>{% endif %}
+          <p class="m" style="margin-top:8px; font-size:11px">{{ ai.provider }} / {{ ai.model }} · reasons only from the facts below; nothing invented</p>
+          {% endif %}
+        </div>
+        {% elif ins.ai_enabled %}
+        <div class="ai"><p class="m">AI analysis was not run for this scan (see the data gaps above).</p></div>
+        {% endif %}
+
+        <details class="why">
+          <summary><span>The trades behind the flag</span><span class="m">{{ f.top_trades|length }} alerts · {{ f.contracts|length }} contracts</span></summary>
+          {% if f.top_trades %}
+          <div class="table-wrap" style="margin-top:8px"><table>
+            <tr><th>When</th><th>Type</th><th class="num">Strike</th><th>Expiry</th><th class="num">DTE</th><th class="num">Premium</th><th class="num">Vol/OI</th><th class="num">OTM</th><th class="num">Ask</th><th>Flags</th></tr>
+            {% for t in f.top_trades %}
+            <tr>
+              <td class="m">{{ t.when }}</td>
+              <td class="{{ 'g' if t.type == 'call' else 'r' }}">{{ t.type }}</td>
+              <td class="num">{{ '%.1f'|format(t.strike) if t.strike else '–' }}</td>
+              <td>{{ t.expiry }}</td>
+              <td class="num">{{ t.dte if t.dte is not none else '–' }}</td>
+              <td class="num">${{ '{:,.0f}'.format(t.premium) }}</td>
+              <td class="num">{{ '%.1f'|format(t.vol_oi) }}</td>
+              <td class="num">{{ '%.0f%%'|format(t.otm_pct) if t.otm_pct is not none else '–' }}</td>
+              <td class="num">{{ '%.0f%%'|format(t.ask_share * 100) if t.ask_share is not none else '–' }}</td>
+              <td class="m">{% if t.sweep %}sweep {% endif %}{% if t.floor %}floor {% endif %}{% if t.all_opening %}opening {% endif %}{{ t.rule or '' }}</td>
+            </tr>
+            {% endfor %}
+          </table></div>
+          {% endif %}
+          {% if f.contracts %}
+          <h4 class="m" style="margin:10px 0 4px; font-size:11px; text-transform:uppercase; letter-spacing:.08em">Unusual contracts (daily screen)</h4>
+          <div class="table-wrap"><table>
+            <tr><th>Session</th><th>Type</th><th class="num">Strike</th><th>Expiry</th><th class="num">Premium</th><th class="num">Volume</th><th class="num">OI</th><th class="num">Vol/OI</th><th class="num">OTM</th><th class="num">Ask</th></tr>
+            {% for c in f.contracts %}
+            <tr>
+              <td class="m">{{ c.date }}</td>
+              <td class="{{ 'g' if c.type == 'call' else 'r' }}">{{ c.type }}</td>
+              <td class="num">{{ '%.1f'|format(c.strike) if c.strike else '–' }}</td>
+              <td>{{ c.expiry }}</td>
+              <td class="num">${{ '{:,.0f}'.format(c.premium) }}</td>
+              <td class="num">{{ '{:,.0f}'.format(c.volume) }}</td>
+              <td class="num">{{ '{:,.0f}'.format(c.open_interest) }}</td>
+              <td class="num">{{ '%.1f'|format(c.vol_oi) }}</td>
+              <td class="num">{{ '%.0f%%'|format(c.otm_pct) if c.otm_pct is not none else '–' }}</td>
+              <td class="num">{{ '%.0f%%'|format(c.ask_share * 100) if c.ask_share is not none else '–' }}</td>
+            </tr>
+            {% endfor %}
+          </table></div>
+          {% endif %}
+        </details>
+
+        {% if f.context %}
+        <details class="why">
+          <summary><span>Public context given to the analyst</span><span class="m">{{ f.context.headlines|length }} headlines · {{ f.context.insider_filings_90d|length }} insider filings</span></summary>
+          <div class="ctx compact" style="margin-top:8px">
+            <div><div class="k">Next earnings</div><div class="v">{{ f.context.earnings_date or 'unknown' }}{% if f.context.days_to_earnings is not none %} <span class="m" style="font-size:11px">{{ f.context.days_to_earnings }}d</span>{% endif %}</div></div>
+            <div><div class="k">Short float</div><div class="v">{{ '%.1f%%'|format(f.context.short_float_pct) if f.context.short_float_pct is not none else '–' }}</div></div>
+            <div><div class="k">Insider trans.</div><div class="v">{{ '%+.1f%%'|format(f.context.insider_trans_pct) if f.context.insider_trans_pct is not none else '–' }}</div></div>
+          </div>
+          {% if f.context.headlines %}
+          <div class="hl" style="margin-top:8px">{% for h in f.context.headlines[:12] %}<div><span class="m">{{ h.when[:10] }}</span>{{ h.title }} <span class="m">· {{ h.source }}</span></div>{% endfor %}</div>
+          {% else %}<p class="m" style="font-size:12px; margin:8px 0 0">No headlines could be gathered for the window.</p>{% endif %}
+          {% if f.context.insider_filings_90d %}
+          <div class="table-wrap" style="margin-top:8px"><table>
+            <tr><th>Date</th><th>Who</th><th>Side</th><th class="num">Shares</th><th class="num">Value</th></tr>
+            {% for r in f.context.insider_filings_90d[:8] %}
+            <tr><td class="m">{{ (r.date or '')[:10] }}</td><td class="wrap">{{ r.owner_name or '' }}{% if r.officer_title %} <span class="m">{{ r.officer_title }}</span>{% endif %}</td><td>{{ r.buy_sell or r.transaction_code or '' }}</td><td class="num">{{ '{:,.0f}'.format(r.shares|float) if r.shares else '–' }}</td><td class="num">{{ '${:,.0f}'.format(r.premium|float) if r.premium else '–' }}</td></tr>
+            {% endfor %}
+          </table></div>
+          {% endif %}
+          {{ m.gaps_box(f.context.data_gaps, 'Context that could not be sourced') }}
+        </details>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No ticker scored ≥ {{ '%g'|format(ins.min_flag_score) }} this week. {{ scan.tickers_considered }} tickers had unusual flow that met the raw filters but nothing stood out enough to investigate.</div>
+    {% endif %}
+  </section>
+
+  {% if scan.below_threshold %}
+  <section class="col-6">
+    <h2>Just below the bar <span class="count">{{ scan.below_threshold|length }}</span> <span class="m sub">unusual, but not enough to flag</span></h2>
+    <div class="table-wrap"><table>
+      <tr><th>Symbol</th><th class="num">Score</th><th>Direction</th><th class="num">Premium</th><th class="num">Alerts</th></tr>
+      {% for r in scan.below_threshold %}
+      <tr><td><b><a href="/symbol/{{ r.ticker }}">{{ r.ticker }}</a></b></td><td class="num">{{ '%.1f'|format(r.score) }}</td><td class="dir {{ r.direction }}">{{ r.direction }}</td><td class="num">${{ '{:,.0f}'.format(r.premium_total) }}</td><td class="num">{{ r.alerts }}</td></tr>
+      {% endfor %}
+    </table></div>
+  </section>
+  {% endif %}
+
+  <section class="col-6">
+    <h2>Thresholds used</h2>
+    <div class="table-wrap"><table>
+      {% for k, v in scan.thresholds.items() %}{% if k != 'excluded' %}<tr><td class="m">{{ k|replace('_', ' ') }}</td><td>{{ v if v is not none else 'none' }}</td></tr>{% endif %}{% endfor %}
+      <tr><td class="m">excluded</td><td class="wrap" style="font-size:12px">{{ scan.thresholds.excluded|join(', ') }}</td></tr>
+    </table></div>
+    {% if scan.enrichment %}
+    <p class="m" style="font-size:12px; margin:10px 0 0">{{ scan.enrichment.enriched }} candidates were checked against the API's stock info and option-volume history ({{ scan.enrichment.calls }} reads).
+      {% if scan.enrichment.excluded_by_cap %}Removed by the market-cap window: {% for e in scan.enrichment.excluded_by_cap %}<b>{{ e.ticker }}</b>{% if e.market_cap %} (${{ '%.0f'|format(e.market_cap / 1e9) }}B){% endif %}{{ ', ' if not loop.last }}{% endfor %}.{% endif %}
+      {% if scan.enrichment.excluded_issue_type %}Not common stock: {% for e in scan.enrichment.excluded_issue_type %}{{ e.ticker }}{{ ', ' if not loop.last }}{% endfor %}.{% endif %}</p>
+    {% endif %}
+    <p class="m" style="font-size:12px; margin:10px 0 0">Change these in <a href="/settings">settings → Saturday insider / unusual-options scan</a>.</p>
+  </section>
+  {% endif %}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const btn = document.getElementById('run-insider');
+  if (btn) btn.addEventListener('click', async () => {
+    btn.disabled = true; btn.textContent = 'Scanning…';
+    await fetch('/api/insider/run', { method: 'POST' });
+    const poll = setInterval(async () => {
+      const r = await (await fetch('/api/insider')).json();
+      if (!r.run.running) { clearInterval(poll); location.reload(); }
+    }, 3000);
+  });
+</script>
+{% endblock %}

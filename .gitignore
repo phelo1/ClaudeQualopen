@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+*.egg-info/
+.env
+settings.env
+llm_providers.json
+data/cache/
+paper_state/
+reports/

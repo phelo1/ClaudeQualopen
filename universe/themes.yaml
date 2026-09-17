@@ -1,0 +1,18 @@
+# Theme / segment groups used for "strongest stocks in the strongest themes".
+# A ticker may belong to several themes; it inherits the best-ranked one.
+# Edit freely - themes rotate every few months and this list will go stale.
+
+ai_semis: [NVDA, AMD, AVGO, MRVL, ARM, MU, TSM, ALAB, CRDO, COHR]
+ai_infrastructure: [SMCI, ANET, VRT, DELL, CIEN, ALAB, CRDO, COHR]
+ai_software: [PLTR, APP, SNOW, MDB, DDOG, DUOL, RDDT]
+cybersecurity: [CRWD, NET, ZS, PANW, S, RBRK]
+fintech_crypto: [COIN, HOOD, MSTR, SOFI, AFRM, UPST, CRCL]
+quantum: [IONQ, RGTI, QUBT, QBTS]
+space: [RKLB, ASTS, LUNR, RDW, PL]
+evtol_autonomy: [ACHR, JOBY, TSLA, UBER]
+nuclear_power: [OKLO, SMR, VST, CEG, NRG, TLN, CCJ, URA, GEV]
+grid_datacenter_buildout: [GEV, PWR, FIX, ETN, VRT, VST, CEG]
+glp1_health: [LLY, NVO, HIMS, VKTX]
+med_devices_diagnostics: [TMDX, GH, NTRA, RXRX]
+consumer_momentum: [CVNA, CELH, ELF, DKNG, SHOP, TTD, HUBS]
+defense_tech: [AXON, RKLB, PLTR, KTOS]

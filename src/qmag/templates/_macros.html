@@ -1,0 +1,245 @@
+{# Shared fragments: score chips, sentiment gauges, the context strip and the justification block. #}
+
+{# ⓘ with a hover / focus / tap tooltip; renders nothing when there is no text. #}
+{% macro info(text) -%}
+{% if text %}<span class="info" tabindex="0" role="img" aria-label="{{ text }}" data-tip="{{ text }}">i</span>{% endif %}
+{%- endmacro %}
+
+{% macro score_class(s) -%}
+{{ 'g' if s is not none and s > 0.15 else 'r' if s is not none and s < -0.15 else 'm' }}
+{%- endmacro %}
+
+{% macro score_chip(s, label=None) -%}
+{% if s is none %}<span class="chip m">{{ label or 'n/a' }}</span>{% else %}<span class="chip {{ score_class(s) }}">{% if label %}{{ label }} {% endif %}{{ '%+.2f'|format(s) }}</span>{% endif %}
+{%- endmacro %}
+
+{% macro gauge(s) -%}
+{% if s is not none %}<div class="gauge" title="{{ '%+.2f'|format(s) }}"><i style="left: {{ ((s + 1) / 2 * 100)|round|int }}%"></i></div>{% endif %}
+{%- endmacro %}
+
+{% macro humanize(n) -%}
+{% if n is none %}–{% elif n >= 1e12 %}{{ '%.1fT'|format(n / 1e12) }}{% elif n >= 1e9 %}{{ '%.1fB'|format(n / 1e9) }}{% elif n >= 1e6 %}{{ '%.1fM'|format(n / 1e6) }}{% elif n >= 1e3 %}{{ '%.0fK'|format(n / 1e3) }}{% else %}{{ '%.0f'|format(n) }}{% endif %}
+{%- endmacro %}
+
+{% macro context_strip(ctx, compact=False) -%}
+{% if ctx %}
+<div class="ctx {{ 'compact' if compact }}">
+  <div><div class="k">News</div><div class="v {{ score_class(ctx.news_score) }}">{{ '%+.2f'|format(ctx.news_score) if ctx.news_score is not none else '–' }} <span class="m" style="font-weight:400">· {{ ctx.news_count }}</span></div>{{ gauge(ctx.news_score) }}</div>
+  <div><div class="k">Social</div><div class="v {{ score_class(ctx.social_score) }}">{{ '%+.2f'|format(ctx.social_score) if ctx.social_score is not none else '–' }} <span class="m" style="font-weight:400">· {{ ctx.social_messages }}</span></div>{{ gauge(ctx.social_score) }}</div>
+  <div><div class="k">Options flow{% if ctx.flow_unusual %} <span class="a">· unusual</span>{% endif %}</div><div class="v {{ score_class(ctx.flow_score) }}">{% if ctx.flow_score is not none %}{{ '%+.2f'|format(ctx.flow_score) }} <span class="m" style="font-weight:400">· {{ ctx.flow_alerts }}</span>{% elif ctx.errors and ctx.errors.unusual_whales and 'API_KEY' in ctx.errors.unusual_whales %}<span class="m">no key</span>{% elif ctx.available and 'unusual_whales' in ctx.available %}<span class="m">quiet</span>{% else %}<span class="m">off</span>{% endif %}</div>{{ gauge(ctx.flow_score) }}</div>
+  {% set e = ctx.get('edge') %}{% set es = ctx.get('edge_score') %}
+  <div><div class="k">UW edge{% if e and e.get('passed') is not none %} <span class="{{ 'g' if e.passed else 'r' }}">· {{ 'pass' if e.passed else 'fail' }}</span>{% endif %}</div><div class="v {{ score_class(es) }}">{% if es is not none %}{{ '%+.2f'|format(es) }} <span class="m" style="font-weight:400">· {{ e.answered }}/{{ e.applicable }}</span>{% elif e and e.get('error') and 'API_KEY' in e.error %}<span class="m">no key</span>{% elif e %}<span class="r">no data</span>{% else %}<span class="m">–</span>{% endif %}</div>{{ gauge(es) }}</div>
+  <div><div class="k">Earnings</div><div class="v {{ 'r' if ctx.days_to_earnings is not none and ctx.days_to_earnings <= 3 else '' }}">{% if ctx.days_to_earnings is not none %}in {{ ctx.days_to_earnings }}d{% elif ctx.earnings_recent_days is not none %}{{ ctx.earnings_recent_days }}d ago{% else %}–{% endif %}</div></div>
+  <div><div class="k">Float</div><div class="v {{ 'a' if ctx.float_shares is not none and ctx.float_shares < 30e6 else '' }}">{{ humanize(ctx.float_shares) }}</div></div>
+  <div><div class="k">Short %</div><div class="v {{ 'a' if ctx.short_float_pct is not none and ctx.short_float_pct >= 15 else '' }}">{{ '%.1f%%'|format(ctx.short_float_pct) if ctx.short_float_pct is not none else '–' }}</div></div>
+  {% if not compact %}<div><div class="k">Mkt cap</div><div class="v">{{ humanize(ctx.market_cap) }}</div></div>{% endif %}
+</div>
+{% if ctx.catalysts %}<div style="margin-top:6px">{% for c in ctx.catalysts %}<span class="tag">{{ c }}</span>{% endfor %}{% if ctx.industry %} <span class="m" style="font-size:12px"> · {{ ctx.sector }} / {{ ctx.industry }}</span>{% endif %}</div>
+{% elif ctx.industry %}<div class="m" style="margin-top:6px; font-size:12px">{{ ctx.sector }} / {{ ctx.industry }}</div>{% endif %}
+{% endif %}
+{%- endmacro %}
+
+{% macro verdict_box(plan) -%}
+{% set v = plan.rationale.verdict if plan.rationale else '' %}
+{% set cls = 'reject' if not plan.ok or v.startswith('REJECT') or v.startswith('PASS') else 'reduce' if v.startswith('REDUCE') or (plan.committee and plan.committee.verdict == 'reduce') else '' %}
+<div class="verdict {{ cls }}">{{ v or ('All checks passed.' if plan.ok else 'Failed: ' ~ plan.failed_checks|join(', ')) }}</div>
+{%- endmacro %}
+
+{% macro gaps_box(gaps, title='Data that could not be sourced') -%}
+{% if gaps %}
+<div class="gaps"><b>{{ title }}</b><ul>{% for g in gaps %}<li>{{ g }}</li>{% endfor %}</ul></div>
+{% endif %}
+{%- endmacro %}
+
+{% macro why_block(plan) -%}
+{% set r = plan.rationale or {} %}
+<div class="why-body">
+  {% if r.setup %}<h4>Setup</h4><p>{{ r.setup }}</p>{% endif %}
+  {% if r.entry %}<h4>Entry</h4><p>{{ r.entry }}</p>{% endif %}
+  {% if r.size %}<h4>Position size</h4><p>{{ r.size }}</p>{% endif %}
+  {% if r.stop %}<h4>Stop loss</h4><p>{{ r.stop }}</p>{% endif %}
+  {% if r.profit_plan %}<h4>Profit taking</h4><p>{{ r.profit_plan }}</p>{% endif %}
+  {% if r.context %}<h4>Market, sector &amp; sentiment</h4><p>{{ r.context }}</p>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro plan_card(p, config) -%}
+<div class="card">
+  {% if p.execution_status %}<div style="padding:10px 14px 0"><span class="evidence-label">{{ p.execution_status }}</span></div>{% endif %}
+  {% if p.chart %}<img src="{{ p.chart }}" alt="{{ p.symbol }} setup chart" loading="lazy">{% endif %}
+  <div class="body">
+    <div class="title"><b><a href="/plan/{{ p.symbol }}">{{ p.symbol }}</a></b><span class="m">{{ p.setup.replace('_', ' ') }}{% if p.theme %} · {{ p.theme|replace('Industry: ', '') }}{% endif %} · score {{ '%.1f'|format(p.score) }}</span></div>
+    <div class="levels">
+      <div><div class="k">Entry</div><div class="v g">{{ '%.2f'|format(p.entry) }}</div></div>
+      <div><div class="k">Stop</div><div class="v r">{{ '%.2f'|format(p.stop) }} <span class="m" style="font-weight:400;font-size:11px">−{{ '%.1f%%'|format((1 - p.stop / p.entry) * 100) }}</span></div></div>
+      <div><div class="k">Target ⅓</div><div class="v b">{{ '%.2f'|format(p.partial_target) if p.partial_target else '–' }}</div></div>
+      <div><div class="k">Shares</div><div class="v">{{ p.shares }} <span class="m" style="font-weight:400;font-size:11px">${{ '{:,.0f}'.format(p.position_value) }}</span></div></div>
+    </div>
+    {{ verdict_box(p) }}
+    {{ gaps_box(p.data_gaps) }}
+    {{ committee_box(p.committee) }}
+    {{ reviewer_box(p.reviewer, p.notes.reviewer if p.notes else none, config) }}
+    {{ context_strip(p.context, compact=True) }}
+    <div class="checks" style="margin-top:10px">
+      {% for k, v in p.checks.items() %}<span class="check {{ 'ok' if v else 'bad' }}">{{ '✓' if v else '✗' }} {{ k.replace('_', ' ') }}</span>{% endfor %}
+    </div>
+    <div class="plan-summary">Risk ${{ '{:,.0f}'.format(p.risk_dollars) }} ({{ '%.2f%%'|format(p.risk_pct * 100) }}) · position {{ '%.1f%%'|format(p.position_pct * 100) }} of equity · {{ p.partial_qty }} sh off at +{{ config.management.partial_target_r }}R or day {{ p.partial_after_days }}, then breakeven + {{ p.trail_ma }}d MA trail</div>
+    <details class="why">
+      <summary><span>Why: entry, size, stop, profit plan</span><a href="/plan/{{ p.symbol }}">Full analysis →</a></summary>
+      {{ why_block(p) }}
+    </details>
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro reviewer_class(v) -%}
+{{ 'reject' if v.action == 'SELL' else 'reduce' if v.action == 'HOLD' or (v.sizeMultiplier is not none and v.sizeMultiplier < 1) else '' }}
+{%- endmacro %}
+
+{% macro reviewer_box(v, note=None, config=None) -%}
+{% if v %}
+{% set mode = config.reviewer.mode if config and config.reviewer else 'advisory' %}
+{% if v.error %}
+<div class="verdict reduce">
+  <b>LLM reviewer: unavailable</b> <span class="m">· {{ mode|mode_label }}{% if note %} · {{ note }}{% endif %}</span>
+  <div class="m" style="margin-top:4px; font-size:12px">{{ v.error }}</div>
+</div>
+{% else %}
+<div class="verdict {{ reviewer_class(v) }}">
+  <b>LLM reviewer: <span class="{{ 'g' if v.action == 'BUY' else 'r' if v.action == 'SELL' else 'a' }}">{{ v.action }}</span></b> · confidence {{ '%.0f%%'|format(v.confidence * 100) }}{% if v.sizeMultiplier is not none and v.sizeMultiplier < 1 %} · size ×{{ '%.2f'|format(v.sizeMultiplier) }}{% endif %} <span class="m">· {{ mode|mode_label }}{% if note and note != 'advisory' %} · {{ note }}{% endif %}</span>
+  {% if v.thesis %}<div style="margin-top:4px">{{ v.thesis }}</div>{% endif %}
+  {% if v.invalidation %}<div class="m" style="margin-top:4px; font-size:12px"><b>Invalidation:</b> {{ v.invalidation }}</div>{% endif %}
+</div>
+{% endif %}
+{% endif %}
+{%- endmacro %}
+
+{% macro reviewer_panel(v, note=None, config=None) -%}
+{% set mode = config.reviewer.mode if config and config.reviewer else 'advisory' %}
+{% if v and not v.error %}
+<div class="review-head">
+  <span class="review-action {{ 'g' if v.action == 'BUY' else 'r' if v.action == 'SELL' else 'a' }}">{{ v.action }}</span>
+  <div>
+    <div><b>Confidence {{ '%.0f%%'|format(v.confidence * 100) }}</b> · size ×{{ '%.2f'|format(v.sizeMultiplier if v.sizeMultiplier is not none else 1) }}</div>
+    <div class="m" style="font-size:12px">{{ v.provider }} / {{ v.model }} · mode: {{ mode|mode_label }}{% if note and note != 'advisory' %} · {{ note }}{% endif %}</div>
+  </div>
+</div>
+<div class="prose">
+  <h3>Thesis</h3><p>{{ v.thesis or '–' }}</p>
+  <div class="split" style="margin-top:12px">
+    <div><h3 class="g">Catalysts</h3>{% if v.catalysts %}<ul class="tight">{% for c in v.catalysts %}<li>{{ c }}</li>{% endfor %}</ul>{% else %}<p class="m">None cited.</p>{% endif %}</div>
+    <div><h3 class="r">Risks</h3>{% if v.risks %}<ul class="tight">{% for c in v.risks %}<li>{{ c }}</li>{% endfor %}</ul>{% else %}<p class="m">None cited.</p>{% endif %}</div>
+  </div>
+  <h3 style="margin-top:12px">Invalidation</h3><p>{{ v.invalidation or '–' }}</p>
+  <h3 style="margin-top:12px">Size note</h3><p>{{ v.sizeNote or '–' }}</p>
+</div>
+{% elif v %}
+<div class="empty">Reviewer unavailable ({{ v.provider }} / {{ v.model }}): {{ v.error }}<div class="m" style="margin-top:6px">Trader behaviour: {{ note or ('fail-closed, no trade' if config and config.reviewer.fail_closed else 'fail-open, rules decide') }}.</div></div>
+{% else %}
+<div class="empty">Reviewer not run for this plan.{% if config and not config.reviewer.enabled %} Enable it with <code>reviewer.enabled: true</code> and a <code>GEMINI_API_KEY</code> or <code>OPENAI_API_KEY</code>.{% endif %}</div>
+{% endif %}
+{%- endmacro %}
+
+{% macro flow_panel(ctx, config=None) -%}
+{% set on = config and config.options_flow and config.options_flow.enabled %}
+{% if ctx.flow_score is not none or (ctx.available and ctx.available.unusual_whales) %}
+<div class="stats" style="grid-template-columns: repeat(3, 1fr)">
+  <div class="stat"><div class="k">Flow tilt</div><div class="v {{ score_class(ctx.flow_score) }}">{{ '%+.2f'|format(ctx.flow_score) if ctx.flow_score is not none else '–' }}</div></div>
+  <div class="stat"><div class="k">Bullish / bearish premium</div><div class="v sm"><span class="g">${{ humanize(ctx.flow_bull_premium) }}</span> <span class="m">/</span> <span class="r">${{ humanize(ctx.flow_bear_premium) }}</span></div></div>
+  <div class="stat"><div class="k">Call vol vs 30d</div><div class="v sm {{ 'a' if ctx.flow_call_vol_ratio is not none and ctx.flow_call_vol_ratio >= 2 else '' }}">{{ '%.1fx'|format(ctx.flow_call_vol_ratio) if ctx.flow_call_vol_ratio is not none else '–' }}{% if ctx.flow_put_vol_ratio is not none %} <span class="m" style="font-weight:400;font-size:11px">puts {{ '%.1fx'|format(ctx.flow_put_vol_ratio) }}</span>{% endif %}</div></div>
+  <div class="stat"><div class="k">Option volume pctile</div><div class="v sm {{ 'a' if ctx.flow_opt_vol_pctile is not none and ctx.flow_opt_vol_pctile >= 90 else '' }}">{{ '%.0f'|format(ctx.flow_opt_vol_pctile) if ctx.flow_opt_vol_pctile is not none else '–' }}</div></div>
+  <div class="stat"><div class="k">Unusual trades</div><div class="v sm">{{ ctx.flow_alerts }} <span class="m" style="font-weight:400;font-size:11px"><span class="g">{{ ctx.flow_bull_alerts }} bull</span> · <span class="r">{{ ctx.flow_bear_alerts }} bear</span> · {{ ctx.flow_sweeps }} sweeps</span></div></div>
+  <div class="stat"><div class="k">Verdict</div><div class="v sm {{ 'a' if ctx.flow_unusual else 'm' }}">{{ 'UNUSUAL ACTIVITY' if ctx.flow_unusual else 'nothing unusual' }}</div></div>
+</div>
+{% if ctx.flow_trades %}
+<div class="table-wrap" style="margin-top:10px"><table>
+  <tr><th>When</th><th>Contract</th><th class="num">DTE</th><th class="num">Premium</th><th>Side</th><th class="num">Vol/OI</th><th class="num">OTM</th><th>Flags</th></tr>
+  {% for t in ctx.flow_trades %}
+  <tr>
+    <td class="m">{{ t.when[5:] if t.when else '–' }}</td>
+    <td class="{{ 'g' if t.direction == 'bull' else 'r' if t.direction == 'bear' else '' }}"><b>{{ '%g'|format(t.strike) if t.strike is not none else '' }}{{ 'C' if t.type == 'call' else 'P' if t.type == 'put' else t.type|upper }}</b> <span class="m">{{ t.expiry }}</span></td>
+    <td class="num">{{ t.dte if t.dte is not none else '–' }}</td>
+    <td class="num">${{ humanize(t.premium) }}</td>
+    <td class="{{ 'g' if t.direction == 'bull' else 'r' if t.direction == 'bear' else 'm' }}">{{ {'ask': 'bought @ ask', 'bid': 'sold @ bid'}.get(t.side, '–') }}</td>
+    <td class="num {{ 'a' if t.vol_oi is not none and t.vol_oi > 1 else '' }}">{{ '%.1f'|format(t.vol_oi) if t.vol_oi is not none else '–' }}</td>
+    <td class="num">{{ '%.0f%%'|format(t.otm_pct) if t.otm_pct is not none else '–' }}</td>
+    <td>{% if t.sweep %}<span class="tag">sweep</span>{% endif %}{% if t.floor %}<span class="tag">floor</span>{% endif %}{% if t.rule %}<span class="tag" title="{{ t.rule }}">{{ t.rule|replace('RepeatedHits', 'rep. hits ')|lower }}</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% elif ctx.flow_score is not none %}<p class="m" style="margin:8px 0 0">No single trade cleared the premium floor; the tilt comes from the day's premium and volume summary.</p>{% endif %}
+{% if ctx.flow_note %}<p class="m" style="margin:8px 0 0; font-size:12px">{{ ctx.flow_note }}</p>{% endif %}
+{% elif not on %}
+<div class="empty">Unusual options flow scan is <b>off</b> (<code>options_flow.enabled: false</code>). It uses the paid Unusual Whales API; switch it on in the config or with <code>--options-flow</code> and set <code>UNUSUAL_WHALES_API_KEY</code>.</div>
+{% elif ctx.errors and ctx.errors.unusual_whales and 'API_KEY' in ctx.errors.unusual_whales %}
+<div class="empty">Options flow is on but <code>UNUSUAL_WHALES_API_KEY</code> is not set - nothing was fetched.</div>
+{% else %}
+<div class="empty">Unusual Whales did not answer{% if ctx.errors and ctx.errors.unusual_whales %} — {{ ctx.errors.unusual_whales }}{% endif %}.</div>
+{% endif %}
+{%- endmacro %}
+
+{% macro edge_panel(ctx, config=None, groups=None) -%}
+{% set e = ctx.get('edge') %}
+{% set on = config and config.edge and config.edge.enabled and config.options_flow and config.options_flow.enabled %}
+{% if e and e.features %}
+<div class="stats" style="grid-template-columns: repeat(4, 1fr)">
+  <div class="stat"><div class="k">Edge score</div><div class="v {{ score_class(e.score) }}">{{ '%+.2f'|format(e.score) if e.score is not none else 'n/a' }}</div>{{ gauge(e.score) }}</div>
+  <div class="stat"><div class="k">Entry threshold</div><div class="v sm {{ 'g' if e.passed else 'r' if e.passed is not none else 'm' }}">{% if e.gate %}{{ '%+.2f'|format(e.threshold) }} · {{ 'PASS' if e.passed else 'FAIL' }}{% else %}{{ '%+.2f'|format(e.threshold) }} · advisory{% endif %}</div></div>
+  <div class="stat"><div class="k">Coverage</div><div class="v sm {{ 'r' if e.coverage < e.min_coverage else '' }}">{{ '%.0f%%'|format(e.coverage * 100) }} <span class="m" style="font-weight:400;font-size:11px">of weight · min {{ '%.0f%%'|format(e.min_coverage * 100) }}</span></div></div>
+  <div class="stat"><div class="k">Features</div><div class="v sm">{{ e.answered }}/{{ e.applicable }} <span class="m" style="font-weight:400;font-size:11px">answered · {{ e.calls }} requests, {{ e.cached }} cached{% if e.has_options is sameas false %} · no listed options{% endif %}</span></div></div>
+</div>
+<div class="table-wrap" style="margin-top:10px"><table>
+  <tr><th>Feature</th><th>Reading</th><th class="num">Score</th><th></th><th class="num">Weight</th><th class="num">Contribution</th><th>Status</th></tr>
+  {% for name, f in e.features.items() %}
+  <tr>
+    <td><b>{{ f.label }}</b><div class="m" style="font-size:11px">{{ (groups or {}).get(f.group, f.group) }}</div></td>
+    <td class="m" style="font-size:12px; max-width: 360px">{{ f.value if f.value is not none else '–' }}</td>
+    <td class="num {{ score_class(f.score) }}">{{ '%+.2f'|format(f.score) if f.score is not none else '–' }}</td>
+    <td style="min-width:90px">{{ gauge(f.score) }}</td>
+    <td class="num m">{{ '%g'|format(f.weight) }}</td>
+    <td class="num {{ score_class(f.score) }}">{{ '%+.2f'|format(f.score * f.weight) if f.score is not none else '–' }}</td>
+    <td>{% if f.applicable is sameas false %}<span class="chip m">n/a</span>{% elif f.score is not none %}<span class="chip g">ok</span>{% else %}<span class="chip r" title="{{ f.error or 'no answer' }}">missing</span> <span class="m" style="font-size:11px">{{ f.error or 'no answer' }}</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table></div>
+<p class="m" style="margin:8px 0 0; font-size:12px">Score = Σ weight × sub-score / Σ weight over the features that answered. A missing feature is <b>not</b> counted as neutral: it lowers coverage, and the entry gate needs coverage ≥ {{ '%.0f%%'|format(e.min_coverage * 100) }} as well as score ≥ {{ '%+.2f'|format(e.threshold) }}.{% if e.asof %} As of {{ e.asof }}.{% endif %}</p>
+{% elif not on %}
+<div class="empty">Unusual Whales edge score is <b>off</b>{% if config and config.options_flow and not config.options_flow.enabled %} (it runs after the options-flow scan, which is off){% else %} (<code>edge.enabled: false</code>){% endif %}.</div>
+{% elif e and e.get('error') and 'API_KEY' in e.error %}
+<div class="empty">Edge score is on but <code>UNUSUAL_WHALES_API_KEY</code> is not set - nothing was fetched.</div>
+{% elif e and e.get('error') %}
+<div class="empty">Edge score not computed — {{ e.error }}.</div>
+{% else %}
+<div class="empty">Edge score not computed for this symbol (beyond the per-cycle cap of {{ config.edge.max_symbols_per_cycle }} tickers, or context not gathered yet).</div>
+{% endif %}
+{%- endmacro %}
+
+{% macro committee_box(c, full=False) -%}
+{% if c %}
+{% set seats = c.get('seats') or {} %}
+<div class="verdict {{ 'reject' if c.get('verdict') == 'reject' else 'reduce' if c.get('verdict') == 'reduce' else '' }}" style="{{ 'border-left-color: var(--muted)' if c.get('error') }}">
+  {% if c.get('error') %}
+  <b>AI committee: NO RULING</b> <span class="m">— {{ c.error }}</span>
+  {% else %}
+  <b>AI committee: {{ c.verdict|upper }}</b>{% if c.confidence is not none %} · confidence {{ '%.0f%%'|format(c.confidence * 100) }}{% endif %}{% if c.size_multiplier is not none and c.verdict == 'reduce' %} · size ×{{ '%.2f'|format(c.size_multiplier) }}{% endif %}
+  {% if seats.risk %}<span class="m" style="font-size:11px"> · chair {{ seats.risk.get('provider') }} / {{ seats.risk.get('model') }}</span>{% endif %}
+  {% endif %}
+  {% if c.get('decisive_factor') %}<div style="margin-top:4px"><b>Decisive:</b> {{ c.decisive_factor }}</div>{% endif %}
+  {% if c.get('risk_review') %}<div class="m" style="margin-top:4px">{{ c.risk_review }}</div>{% endif %}
+  {% if full and seats %}
+  <div class="split" style="margin-top:10px">
+    {% for seat, cls in (('bull', 'bull'), ('bear', 'bear')) %}{% set st = seats.get(seat) %}{% if st %}
+    <div class="{{ cls }}">
+      <div style="display:flex; justify-content:space-between; gap:8px; font-size:12px"><b class="{{ 'g' if seat == 'bull' else 'r' }}">{{ st.label }}</b><span class="m">{{ st.get('provider') }} / {{ st.get('model') }}{% if st.get('confidence') is not none %} · {{ '%.0f%%'|format(st.confidence * 100) }} {{ 'it works' if seat == 'bull' else 'it fails' }}{% endif %}</span></div>
+      {% if st.get('error') %}<p class="m" style="margin:4px 0 0">Unavailable — {{ st.error }}</p>{% else %}
+      <p style="margin:4px 0 0">{{ st.get('case') }}</p>
+      {% if st.get('key_points') %}<ul class="tight" style="margin-top:4px; font-size:12px">{% for k in st.key_points %}<li>{{ k }}</li>{% endfor %}</ul>{% endif %}
+      {% endif %}
+    </div>
+    {% endif %}{% endfor %}
+  </div>
+  {% if c.get('debate') %}<div class="m" style="font-size:11px; margin-top:6px">Debate on: the bear read the bull case before writing; the chair read both.</div>{% endif %}
+  {% endif %}
+</div>
+{% endif %}
+{%- endmacro %}
