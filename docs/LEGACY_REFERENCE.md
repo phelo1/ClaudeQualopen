@@ -49,7 +49,7 @@ clock, with a browser dashboard to watch and interrogate it.
 
 > Looking for the step-by-step account of how a stock goes from the whole
 > market to one order, and which setting moves each step? Read
-> [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
+> [docs/HOW_IT_WORKS.md](HOW_IT_WORKS.md).
 
 **Universe / momentum filter** — stock is up ≥30 % in 1 month, ≥50 % in 3 months
 or ≥100 % in 6 months, ADR ≥ 3.5 %, liquid (≥ $5 M/day), price ≥ $3.
@@ -100,7 +100,7 @@ trade; when the last ten average ≤ −0.2R the risk budget halves, when they
 average ≥ +0.6R it grows to 0.625 % (capped at 1 %). "Size up when the
 market is paying, size down when it is not", made mechanical.
 
-Every number above lives in [`src/qmag/config.py`](src/qmag/config.py) and can
+Every number above lives in [`src/qmag/config.py`](../src/qmag/config.py) and can
 be overridden from a YAML file (`qmag init-config`).
 
 ## Quick start
@@ -420,7 +420,7 @@ python -m pytest tests/test_trader.py -q  # one area
    squeeze, index inclusion…); social posts are scored with platform labels
    plus a trader-slang lexicon; options flow becomes a −1…+1 tilt.
 4. **Checklist** — each idea becomes a `TradePlan`
-   ([`src/qmag/plan.py`](src/qmag/plan.py)) with an explicit pass/fail for:
+   ([`src/qmag/plan.py`](../src/qmag/plan.py)) with an explicit pass/fail for:
    setup triggered, momentum leader, theme strength, sentiment (CSV), market
    regime, liquidity, price floor, stop within 2 ADR, stop ≤ 15 % of price,
    earnings window (breakouts within 3 days of a print are skipped), news
@@ -433,15 +433,15 @@ python -m pytest tests/test_trader.py -q  # one area
    position limit, gross exposure and cash. The budget is 0.5 % of equity
    scaled by the adaptive-risk multiplier from the trade journal.
 6. **Justification** — every plan carries a written rationale
-   ([`src/qmag/rationale.py`](src/qmag/rationale.py)): the setup in numbers,
+   ([`src/qmag/rationale.py`](../src/qmag/rationale.py)): the setup in numbers,
    why the entry is where it is, the sizing arithmetic, why the stop sits
    there, the profit-taking ladder, the market/sector/sentiment read, a bull
    case, a bear case and a verdict. Optionally an **analyst committee**
-   ([`src/qmag/llm.py`](src/qmag/llm.py)) — three separate model calls, a
+   ([`src/qmag/llm.py`](../src/qmag/llm.py)) — three separate model calls, a
    bull seat, a bear seat and a risk chair, each with its own provider and
    model — argues the plan; by default its ruling is advisory
    (`committee.can_veto: false`).
-   Last, the additive **LLM reviewer** ([`src/qmag/reviewer.py`](src/qmag/reviewer.py))
+   Last, the additive **LLM reviewer** ([`src/qmag/reviewer.py`](../src/qmag/reviewer.py))
    can be handed the whole edge bundle — setup, sizing, targets, checklist,
    rationale, news/events, social, options flow, fundamentals, committee
    debate, regime, portfolio — and return a strict-JSON BUY/SELL/HOLD verdict
@@ -602,12 +602,12 @@ qmag backtest --start 2022-01-01 --sentiment-csv data/sentiment.csv
 * Readings forward-fill for `max_staleness_days`, then become NaN, which
   passes the filter (missing data is not a signal).
 * New sources implement `SentimentProvider.scores()` in
-  [`src/qmag/sentiment.py`](src/qmag/sentiment.py) — one method.
+  [`src/qmag/sentiment.py`](../src/qmag/sentiment.py) — one method.
 
 ## Live context: news, social, options flow, events
 
 In live/paper trading every ranked candidate gets a `ContextReport`
-([`src/qmag/context/`](src/qmag/context)) before it is sized. Sources, all
+([`src/qmag/context/`](../src/qmag/context)) before it is sized. Sources, all
 optional and all cached for `context.cache_minutes`:
 
 | Source | What is used | Needs |
@@ -697,7 +697,7 @@ The flow scan answers one question — is somebody betting big on this name
 right now? The Unusual Whales API answers many more, so the trader reads
 everything on it that bears on a long entry, scores each read independently
 and blends them into **one number that must clear a threshold before a
-position is opened** ([`src/qmag/context/edge.py`](src/qmag/context/edge.py)).
+position is opened** ([`src/qmag/context/edge.py`](../src/qmag/context/edge.py)).
 
 **How it is built.** Every feature reads real endpoints and turns them into a
 sub-score in −1…+1 (bullish positive) by a stated rule. The edge score is
@@ -851,7 +851,7 @@ A second, independent opinion modelled on
 [ai-trading-agent-gemini](https://github.com/danilobatson/ai-trading-agent-gemini):
 rather than asking a model to *find* trades, the trader hands it the **whole
 edge bundle** for one candidate and demands a strict-JSON verdict. The bundle
-([`src/qmag/reviewer.py`](src/qmag/reviewer.py), `build_edge_bundle`) is
+([`src/qmag/reviewer.py`](../src/qmag/reviewer.py), `build_edge_bundle`) is
 everything the engine itself saw and nothing more:
 
 - setup geometry (type, pivot, flag length/depth/contraction, gap, relative volume, score, theme rank),
@@ -1434,7 +1434,7 @@ normally quiet, with no scheduled event inside the contracts' life**.
 3. **Gather public context** for each flag: headlines (finviz + Unusual
    Whales), the earnings date, Form 4 insider filings of the last 90 days,
    sector and market cap. Whatever could not be fetched is listed as a gap.
-4. **Ask the AI** ([`src/qmag/insider_scan.py`](src/qmag/insider_scan.py),
+4. **Ask the AI** ([`src/qmag/insider_scan.py`](../src/qmag/insider_scan.py),
    same Gemini / OpenAI-compatible transport as the reviewer) for a
    strict-JSON read: `verdict` (investigate / likely_explained / noise),
    `suspicion` 0–1, `direction`, **what the buyer is speculating on** (the
