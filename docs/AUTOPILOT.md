@@ -28,9 +28,17 @@ Start at Operations. The attention queue names failed jobs, unhealthy connection
 
 API clients use the existing `Authorization: Bearer <dashboard password>` authentication when configured. Do not put credentials in shell history or source control. Browser users authenticate through login. Same-origin checks apply to browser mutations. No maintenance endpoint runs arbitrary shell commands.
 
+Existing Resend email alerts are supported through `RESEND_API_KEY`, `QMAG_ALERT_EMAIL_FROM` and `QMAG_ALERT_EMAIL_TO`. Email carries warnings and errors; `QMAG_ALERT_EMAIL_TRADES=yes` also enables routine information. Telegram and webhook channels remain available. Credential migration does not prove delivery; no test email is sent automatically by the migration.
+
 `/api/operations` returns `schema_version`, `status`, `issues[{code,detail,action}]`, daemon jobs/heartbeat, reconciliation, counts, autonomy and maintenance metadata. Status `attention` means inspect the described issue; it is not permission to clear a halt or delete an order intent. Read the endpoint result before retrying a mutation; research replies `started:false` if already running.
 
 ## Recovery
+
+Before each IBKR connection, a runtime check recreates a missing or closed worker event loop and verifies that the SDK resolves that same loop. An incompatible SDK or a synchronous call on the web server's running loop fails with an actionable diagnostic before connecting. It does not move pending orders between loops or monkey-patch the broker library.
+
+The startup/five-minute reconciliation task also reads the account and updates broker health automatically. It saves execution/protection results before the account check. A temporary failure is recorded; the scheduler retries with backoff (initially 60 seconds, capped at 15 minutes, or the next scheduled check if sooner). The writer lease releases the IBKR socket after each operation, so the retry reconnects cleanly. Successful checks reset consecutive failures and task errors while preserving historical error timestamps. Busy long-running tasks can delay checks; this is not a separate real-time watchdog thread.
+
+Systemd restarts crashed application services. Automatic recovery does not bypass broker login/2FA, invent missing data, upgrade dependencies inside a trading process, or blindly resubmit orders with unknown acknowledgements. Credentials, account restrictions, incompatible installations and external outages can still require intervention; the configured alerts and Operations page expose these failures.
 
 - **Feed outage:** repair connectivity/credentials. Scheduled work retries. Independent reconciliation keeps tracking existing broker orders; required missing prices/context block new entries. MT5 targets cannot execute while the controller is down, though attached stops remain at the terminal/broker.
 - **Unknown order acknowledgement:** inspect the persisted order ID/client tag and broker history. The controller retries lookup. Never delete the intent to “unblock” trading; that can create a duplicate order. If history cannot recover it, reconcile with broker records before editing state under a halted desk.

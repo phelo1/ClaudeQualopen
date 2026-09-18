@@ -103,6 +103,7 @@ class FakeStock:
 def fake_ib(monkeypatch):
     mod = types.ModuleType("ib_async")
     mod.IB, mod.Stock = FakeIB, FakeStock
+    mod.util = SimpleNamespace(getLoop=lambda: asyncio.get_event_loop_policy().get_event_loop())
     monkeypatch.setitem(sys.modules, "ib_async", mod)
     FakeIB.served, FakeIB.refuse, FakeIB.instances = {}, False, []
     data_mod._IBKR_DATA_BLOCK.update(until=0.0, reason="")
@@ -134,6 +135,38 @@ def test_ib_symbol_and_bars_to_frame():
     # IB marks no-trade bars with -1; they are dropped, not stored as prices.
     bad = _bars() + [SimpleNamespace(date=pd.Timestamp("2025-02-14").date(), open=-1, high=-1, low=-1, close=-1, volume=-1)]
     assert len(ib_bars_to_frame(bad)) == 30
+
+
+def test_ibkr_connect_from_research_thread_has_event_loop(fake_ib, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    def work():
+        provider = IBKRProvider(cache_dir=tmp_path, client_id=1000017)
+        try:
+            provider._connect()
+            assert asyncio.get_event_loop() is not None
+            return fake_ib.instances[-1].connect_args
+        finally:
+            provider._disconnect()
+            asyncio.get_event_loop().close()
+            asyncio.set_event_loop(None)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        assert pool.submit(work).result() == ("127.0.0.1",4002,1000017,True)
+
+
+def test_session_passes_independent_data_client_id(monkeypatch):
+    from qmag.session import load_frames
+    from qmag.config import StrategyConfig
+    captured = {}
+    def load(symbols, **kwargs):
+        captured.update(kwargs)
+        return {}
+    def provider(kind, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(load=load)
+    monkeypatch.setattr("qmag.session.make_provider",provider)
+    load_frames("ibkr","unused",None,"SPY",StrategyConfig(),None,None,data_client_id=1000042,minimum_history_bars=300)
+    assert captured["client_id"] == 1000042
+    assert (pd.Timestamp.today().normalize()-pd.Timestamp(captured["start"])).days >= 540
 
 
 def test_ibkr_provider_scales_volume_maps_symbols_and_fills_gaps_from_yahoo(tmp_path, fake_ib, fake_yahoo):

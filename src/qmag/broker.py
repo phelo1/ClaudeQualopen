@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 from .persistence import atomic_text, atomic_json
 import logging
+import math
 import os
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -431,6 +432,7 @@ class IBKRBroker:
     """
 
     name = "ibkr"
+    _fx_cache: dict[tuple, tuple[pd.Timestamp, float]] = {}
 
     def __init__(self, paper: bool = True, host: str | None = None, port: int | None = None, client_id: int | None = None):
         try:
@@ -441,11 +443,8 @@ class IBKRBroker:
         self.port = int(port or os.environ.get("IBKR_PORT") or (7497 if paper else 7496))
         self.client_id = int(client_id or os.environ.get("IBKR_CLIENT_ID", "17"))
         self.paper = paper
-        import asyncio
-        try:
-            asyncio.get_event_loop()
-        except RuntimeError:
-            asyncio.set_event_loop(asyncio.new_event_loop())
+        from .ibkr_runtime import prepare_ibkr_loop
+        prepare_ibkr_loop()
         self.ib = IB()
         self.ib.connect(self.host, self.port, clientId=self.client_id, readonly=False, timeout=15)
         accounts = list(self.ib.managedAccounts())
@@ -491,11 +490,53 @@ class IBKRBroker:
         cash = rows.get("TotalCashValue", (0.0, currency))[0]
         if currency != "USD":
             rate = next((float(v.value) for v in self.ib.accountValues() if v.tag == "ExchangeRate" and v.currency == "USD" and (not getattr(self, "account_id", None) or v.account == self.account_id)), 0.0)
-            if rate > 0:
+            if not math.isfinite(rate) or rate <= 0:
+                rate = self._usd_rate(currency)
+            if math.isfinite(rate) and rate > 0:
                 equity, cash, currency = equity / rate, cash / rate, "USD"
             else:
                 log.warning("IBKR USD conversion unavailable; new USD risk is blocked until the exchange rate is known")
         return Account(equity=equity, cash=cash, currency=currency)
+
+    def _usd_rate(self, currency: str) -> float:
+        """Base-currency units per USD, from a recent IB FX midpoint bar.
+
+        Empty foreign-currency wallets may have no USD ExchangeRate account
+        value. This is a valuation lookup only; it never converts cash or
+        submits an FX order. Missing/stale prices continue to block new risk.
+        """
+        pairs = {"EUR": "EURUSD", "GBP": "GBPUSD", "AUD": "AUDUSD", "NZD": "NZDUSD",
+                 "CAD": "USDCAD", "CHF": "USDCHF", "JPY": "USDJPY", "SEK": "USDSEK",
+                 "NOK": "USDNOK", "DKK": "USDDKK", "HKD": "USDHKD", "SGD": "USDSGD"}
+        pair = pairs.get(currency)
+        if pair is None or not hasattr(self.ib, "reqHistoricalData"):
+            return 0.0
+        now = pd.Timestamp.now(tz="UTC")
+        key = (getattr(self, "host", None), getattr(self, "port", None), getattr(self, "account_id", None), currency)
+        cached = self._fx_cache.get(key)
+        if cached and 0 <= (now-cached[0]).total_seconds() <= 900:
+            return cached[1]
+        try:
+            from ib_async import Forex
+            contract = Forex(pair)
+            if not self.ib.qualifyContracts(contract):
+                return 0.0
+            bars = self.ib.reqHistoricalData(contract, endDateTime="", durationStr="1 D",
+                barSizeSetting="5 mins", whatToShow="MIDPOINT", useRTH=False, formatDate=2, timeout=15)
+            if not bars:
+                return 0.0
+            stamp = pd.Timestamp(bars[-1].date)
+            price = float(bars[-1].close)
+            if stamp.tzinfo is None or not math.isfinite(price) or price <= 0:
+                return 0.0
+            if not 0 <= (now-stamp).total_seconds() <= 900:
+                return 0.0
+            rate = 1/price if pair.endswith("USD") else price
+            self._fx_cache[key] = (stamp, rate)
+            return rate
+        except Exception:
+            log.warning("IBKR FX valuation lookup failed for %s; conversion remains unavailable", currency)
+            return 0.0
 
     def positions(self) -> dict[str, BrokerPosition]:
         out: dict[str, BrokerPosition] = {}

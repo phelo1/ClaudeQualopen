@@ -15,6 +15,22 @@ from qmag.persistence import atomic_json
 from qmag.trader import TraderState, CycleReport, LiveClock, ManagedPosition
 
 
+def test_background_research_uses_independent_readonly_client(tmp_path, monkeypatch):
+    from qmag.session import TradingSession, SessionSettings
+    seen = []
+    def load(session, **kwargs):
+        seen.append(session.s.data_client_id)
+        assert kwargs['history_bars'] == session.cfg.autonomy.min_history_days
+        return {}, session.cfg
+    monkeypatch.setattr(TradingSession,"load",load)
+    monkeypatch.setattr(autonomy,"research",lambda *args: {"status":"collecting"})
+    session=TradingSession(SessionSettings(data="csv",state_dir=tmp_path))
+    assert session.start_research()["started"]
+    session._research_thread.join(timeout=5)
+    assert not session._research_thread.is_alive()
+    assert len(seen)==1 and seen[0]>=1000000 and session.s.data_client_id is None
+
+
 def test_model_fits_weights_with_purged_later_validation():
     rows=[]
     for i,d in enumerate(pd.bdate_range('2024-01-01',periods=160)):

@@ -111,7 +111,19 @@ def test_order_test_cli_and_status_page(tmp_path, csv_universe):
 # --------------------------------------------------------------------------- #
 # Manual arm / buy / override from the lookup page
 # --------------------------------------------------------------------------- #
-def test_manual_buy_uses_a_fresh_plan_and_hands_the_position_to_the_trader(tmp_path, csv_universe):
+@pytest.fixture
+def completed_session_clock(monkeypatch):
+    # The CSV bars contain full-day volume, so evaluate after that day's close.
+    from qmag.market_calendar import NY
+    class Afternoon(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = pd.Timestamp.today().normalize().tz_localize(NY).replace(hour=17).to_pydatetime()
+            return value.astimezone(tz) if tz is not None else value.replace(tzinfo=None)
+    monkeypatch.setattr("qmag.session.datetime", Afternoon)
+
+
+def test_manual_buy_uses_a_fresh_plan_and_hands_the_position_to_the_trader(tmp_path, csv_universe, completed_session_clock):
     sess = _with_leader(tmp_path, csv_universe)
     look = sess.analyze_symbol("LEAD")
     assert look["status"] == "triggered" and look["plan"]["ok"] and look["plan"]["shares"] > 0
@@ -184,7 +196,7 @@ def test_manual_trade_guards_live_accounts_and_stops_above_market(tmp_path, csv_
     assert sess.state().managed == {}
 
 
-def test_lookup_page_offers_actions_and_the_trade_endpoint_answers(tmp_path, csv_universe):
+def test_lookup_page_offers_actions_and_the_trade_endpoint_answers(tmp_path, csv_universe, completed_session_clock):
     sess = _with_leader(tmp_path, csv_universe)
     client = TestClient(create_app(sess))
     page = client.get("/symbol/LEAD")

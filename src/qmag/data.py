@@ -509,6 +509,8 @@ class IBKRProvider(CachedDailyProvider):
             raise RuntimeError("Install the IBKR extra: pip install 'qmag[ibkr]'") from exc
         host, port = self.endpoint()
         client_id = int(self.client_id or os.environ.get("IBKR_DATA_CLIENT_ID", "18"))
+        from .ibkr_runtime import prepare_ibkr_loop
+        prepare_ibkr_loop()
         ib = IB()
         ib.errorEvent += self._on_error
         # ib_async logs every "no security definition" / "no data" answer at

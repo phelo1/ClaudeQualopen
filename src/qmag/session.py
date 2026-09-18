@@ -85,6 +85,7 @@ class SessionSettings:
     state_dir: Path = Path("paper_state")
     charts: bool = True
     cache_dir: Path = Path("data/cache")
+    data_client_id: int | None = None  # independent read-only research connection
     overrides: dict = field(default_factory=dict)
 
     @property
@@ -113,6 +114,8 @@ def load_frames(
     max_age_hours: float | None = None,
     cache_dir: Path = Path("data/cache"),
     stats: dict | None = None,
+    data_client_id: int | None = None,
+    minimum_history_bars: int = 0,
 ) -> tuple[dict[str, pd.DataFrame], StrategyConfig]:
     """Load price frames; returns the (possibly adjusted) config alongside them.
 
@@ -121,6 +124,8 @@ def load_frames(
     """
     data = resolve_data_kind(data)
     kwargs: dict = {"directory": csv_dir, "cache_dir": cache_dir}
+    if data_client_id is not None:
+        kwargs["client_id"] = data_client_id
     if max_age_hours is not None:
         kwargs["max_age_hours"] = max_age_hours
     provider: DataProvider = make_provider(data, **kwargs)
@@ -131,6 +136,9 @@ def load_frames(
     # with no start, fetch enough for the 6-month momentum and theme ranks.
     anchor = pd.Timestamp(start) if start else pd.Timestamp(end) if end else pd.Timestamp.today().normalize()
     lookback_days = int(cfg.warmup_bars * 1.6) if start else int(cfg.warmup_bars * 3)
+    # Research's minimum is in trading sessions; the ordinary indicator
+    # warmup window can be shorter and must not keep research collecting forever.
+    lookback_days = max(lookback_days, int(minimum_history_bars * 1.8) + 14 if minimum_history_bars else 0)
     fetch_start = str((anchor - pd.Timedelta(days=lookback_days)).date())
     frames = provider.load(syms, start=fetch_start, end=end)
     if stats is not None:
@@ -247,8 +255,12 @@ class TradingSession:
         def work():
             try:
                 settings = SessionSettings(**asdict(self.s))
+                # Research must not occupy the foreground IB data client ID.
+                # Native thread IDs distinguish concurrent workers/processes on
+                # this host; this reserved range is only for read-only data.
+                settings.data_client_id = 1_000_000 + threading.get_native_id()
                 independent = TradingSession(settings)
-                frames, _ = independent.load(max_age_hours=24)
+                frames, _ = independent.load(max_age_hours=24, history_bars=independent.cfg.autonomy.min_history_days)
                 state = independent.state()
                 result = research(self.state_dir, frames, independent.operator_cfg, state.closed, state.shadow)
                 self.health.record("autonomy", True, detail=str(result.get("status")))
@@ -301,6 +313,11 @@ class TradingSession:
         state.reconciliation["ok"] = not state.reconciliation.get("issues")
         state.save(self.state_dir / "trader.json")
         self.health.record("execution_reconciliation", state.reconciliation["ok"], detail="; ".join(actions[-5:]), error="; ".join(state.reconciliation.get("issues", [])) or None)
+        # The startup/five-minute job also checks account access. A recovered
+        # broker clears its current failure status without a dashboard click.
+        # Do this after saving execution/protection work so account valuation
+        # failure cannot prevent exit maintenance. The scheduler retries reads.
+        self.account()
         return state.reconciliation
 
     def _overrides_signature(self) -> tuple | None:
@@ -338,13 +355,14 @@ class TradingSession:
         """Read the broker account, recording the outcome. Raises if the broker is unreachable."""
         return self.health.record_result("broker", self.broker.account, detail=f"{self.s.broker}: account read")
 
-    def load(self, asof: str | None = None, max_age_hours: float | None = None) -> tuple[dict[str, pd.DataFrame], StrategyConfig]:
+    def load(self, asof: str | None = None, max_age_hours: float | None = None, history_bars: int = 0) -> tuple[dict[str, pd.DataFrame], StrategyConfig]:
         stats: dict = {}
         t0 = time.perf_counter()
         try:
             frames, cfg = load_frames(
                 self.s.data, self.s.csv_dir, self.s.universe, self.s.symbols, self.cfg, None, asof,
-                max_age_hours=max_age_hours, cache_dir=self.s.cache_dir, stats=stats,
+                max_age_hours=max_age_hours, cache_dir=self.s.cache_dir, stats=stats, data_client_id=self.s.data_client_id,
+                minimum_history_bars=history_bars,
             )
         except Exception as exc:
             self.health.record("price_data", False, detail=f"{self.s.data}: load failed", error=f"{type(exc).__name__}: {exc}", latency_ms=(time.perf_counter() - t0) * 1000, save=False)

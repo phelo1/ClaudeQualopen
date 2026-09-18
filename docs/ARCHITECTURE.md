@@ -19,7 +19,11 @@ The adapters are implementation-complete for the common long-equity lifecycle de
 
 The adapter shapes follow official [IBKR order documentation](https://www.interactivebrokers.com/docs/tws-api/doc/introduction), [Alpaca order methods](https://alpaca.markets/sdks/python/api_reference/trading/orders.html) and [MT5 order-ticket/position deal history](https://www.mql5.com/en/docs/python_metatrader5/mt5historydealsget_py).
 
+For a non-USD IBKR account without a USD wallet exchange-rate field, valuation can use an IBKR FX midpoint bar no older than 15 minutes. Direct and inverse major-currency pairs are handled explicitly. Missing, future-dated, invalid or stale rates leave the account in its base currency and block new USD risk. This is valuation only, not an FX cash-conversion order. Background research initializes its own event loop and uses a separate read-only IB data client ID (1,000,000 plus its native worker thread ID), leaving the configured foreground data and trading IDs available.
+
 ## State and concurrency
+
+The IBKR extra requires `ib_async>=2.1.0,<3`. Version 2.0.1 cached an event loop across the process, causing broker and price-data connections from dashboard/research workers to fail with “The future belongs to a different loop”. The [upstream loop resolver](https://ib-api-reloaded.github.io/ib_async/_modules/ib_async/util.html#getLoop) uses the current thread's loop and replaces closed loops. CI installs the real IBKR SDK and tests concurrent broker/data workers with only the network boundary mocked. The tested dependency snapshot pins a compatible SDK and timezone-data combination; reusing the old timezone constraint can make the package resolver select the broken SDK.
 
 JSON/YAML files live on one local disk. Atomic replacement and a reentrant cross-process writer lease coordinate dashboard, CLI and scheduler. This is not a distributed transaction: a process can fail after a broker accepts an order and before the response is stored, which is why durable intents and recovery tags exist. Research uses a separate registry lease. Every prospective account has an observation checkpoint; interrupted observations prevent promotion.
 

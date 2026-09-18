@@ -4,6 +4,18 @@ Verified 17 September 2026. Source reviewed: phelo1/Claude_Qual at
 eae50d69c3aeee7d8c376773950eb56267258541. The original repository was not modified.
 This report supersedes the 0.2 verification report for current behavior.
 
+## Oracle migration and broker recovery — 18 September 2026
+
+- Full Windows/Python 3.12 suite with the actual IBKR SDK installed: **323 passed**, 5 upstream asyncio/Starlette deprecation warnings, 512.92 seconds. Focused broker/data/manual-action recovery suite: **31 passed**.
+- Reproduced the real IBKR 2.0.1 failure by connecting on the main thread and then a worker thread. After upgrading to 2.1.0, main-thread and two concurrent worker account reads succeeded. Three authenticated dashboard broker probes and an IBKR price-data probe succeeded; no test orders were sent.
+- The SDK requirement and dependency snapshot now prevent the incompatible installation that selected 2.0.1. CI installs the IBKR extra and tests its real loop driver with mocked network responses. Tests include missing/closed loops, concurrent broker/data workers, rejection of a mismatched SDK loop, and rejection of synchronous broker calls inside a running web loop.
+- The runtime guard repairs absent/closed worker loops. Recurring reconciliation checks account access after saving protection/execution results. A temporary-outage regression confirms that the next successful check clears current failure status without submitting orders.
+- The deployed scheduler automatically refreshed broker health at 09:35 UTC on 18 September: OK, zero consecutive failures, successful reconciliation. IB Gateway's start timestamp remained unchanged throughout deployment and repair.
+- Deployment code hashes matched the local source; remote dependency checks passed. A standard wheel was built and checked for the runtime guard and updated SDK requirement.
+- Migration regression coverage includes conservative FX valuation, sufficient research history, separate research client IDs, and preservation of Resend settings. Real historical research completed with no qualifying challenger; the outcome model remained collecting. Optional external-feed warnings remain visible separately from broker health.
+
+These checks validate recovery and broker/data reads on this paper account, not live order/fill certification. See the runbook for recovery limits. Earlier verification below describes the original v0.3 release.
+
 ## Executed checks
 
 | Check | Result | Scope |
@@ -89,7 +101,7 @@ requirements. See [Architecture](ARCHITECTURE.md), [Learning](LEARNING.md) and
 ## Reproduce
 
 ```bash
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,ibkr]"
 python -m pytest tests -q
 python -m pip wheel . --no-deps --wheel-dir dist
 ```
