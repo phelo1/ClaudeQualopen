@@ -294,11 +294,11 @@
         <td><b><a href="/symbol/{{ s.symbol }}">{{ s.symbol }}</a></b></td>
         <td class="m">{{ s.kind|replace('_', ' ') }}</td>
         <td class="wrap" style="font-size:12px">{{ (s.failed_checks|join(', ')) if s.failed_checks else (s.reasons|join('; ')) }}{% if s.get('post_mortem') and s.post_mortem.lesson %}<div class="m">{{ s.post_mortem.lesson }}</div>{% endif %}</td>
-        <td class="num">{{ '%.2f'|format(s.entry) }}</td>
-        <td class="num r">{{ '%.2f'|format(s.stop) }}</td>
-        <td class="m">{{ s.status }}</td>
+        <td class="num">{{ '%.2f'|format(s.entry) if s.entry is number else '–' }}</td>
+        <td class="num r">{{ '%.2f'|format(s.stop) if s.stop is number else '–' }}</td>
+        <td class="m">{{ s.status }}{% if s.status == 'invalid' %}<div title="{{ s.invalid_reason }}">excluded from learning</div>{% endif %}</td>
         <td class="num {{ 'g' if (s.get('r_multiple') or 0) > 0 else 'r' if s.get('r_multiple') is not none else '' }}">{{ '%+.2f'|format(s.r_multiple) if s.get('r_multiple') is not none else '–' }}</td>
-        <td class="m">{{ s.get('exit_reason') or s.get('note') or '' }}{% if s.get('exited_on') %} {{ s.exited_on }}{% endif %}</td>
+        <td class="m">{{ s.get('invalid_reason') or s.get('exit_reason') or s.get('note') or '' }}{% if s.get('exited_on') %} {{ s.exited_on }}{% endif %}</td>
       </tr>
       {% endfor %}
     </table></div>

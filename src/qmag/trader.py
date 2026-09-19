@@ -725,6 +725,10 @@ def record_shadow(
     """
     if not cfg.learning.enabled or not cfg.learning.shadow_enabled:
         return False
+    from .shadow_quality import geometry_error
+    if geometry_error({"entry": round(float(plan.entry), 4), "stop": round(float(plan.stop), 4),
+                       "target": round(float(plan.partial_target), 4) if plan.partial_target is not None else None}):
+        return False
     pivot = float(sig.pivot)
     for s in state.shadow:
         if s.get("status") == "open" and s.get("symbol") == sig.symbol and s.get("kind") == kind and abs(float(s.get("pivot") or 0) - pivot) <= 0.005 * pivot:
@@ -786,6 +790,10 @@ def record_near_misses(
         last = df.iloc[-1]
         entry = float(last["close"])
         stop = entry - cfg.management.stop_adr_mult * float(sig.adr_dollar)
+        from .shadow_quality import geometry_error
+        if geometry_error({"entry": round(entry, 4), "stop": round(stop, 4),
+                           "target": round(_target_for(entry, stop, cfg), 4) if _target_for(entry, stop, cfg) is not None else None}):
+            continue
         pivot = float(sig.pivot)
         if any(s.get("status") == "open" and s.get("symbol") == sig.symbol and s.get("kind") == "near_miss" and abs(float(s.get("pivot") or 0) - pivot) <= 0.005 * pivot for s in state.shadow):
             continue

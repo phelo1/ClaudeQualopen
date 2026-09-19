@@ -413,6 +413,8 @@ def update_shadows(state: "TraderState", data: dict[str, pd.DataFrame], cfg: Str
     partial target, or exit at the close after ``shadow_hold_days`` bars.
     It is a counterfactual, not a P&L. Returns the number resolved now.
     """
+    from .shadow_quality import quarantine_invalid
+    quarantine_invalid(state.shadow, asof)
     ln = cfg.learning
     resolved = 0
     asof_ts = pd.Timestamp(asof)
@@ -427,7 +429,7 @@ def update_shadows(state: "TraderState", data: dict[str, pd.DataFrame], cfg: Str
         if after.empty:
             continue
         entry, stop = float(s["entry"]), float(s["stop"])
-        risk = max(entry - stop, 1e-9)
+        risk = entry - stop  # invalid/non-positive risk was quarantined above
         pivot = float(s.get("pivot") or entry)
         target = float(s["target"]) if s.get("target") else None
         if s.get("immediate"):
@@ -614,6 +616,8 @@ def review(
     apply = ln.auto_apply if apply is None else apply
     requested_apply = apply
     state_dir = Path(state_dir)
+    from .shadow_quality import quarantine_invalid
+    quarantine_invalid(state.shadow, str(pd.Timestamp(now).date()))
     closed = [r for r in state.closed if _f(r.get("r_multiple")) is not None]
     for rec in closed:
         if not rec.get("post_mortem"):

@@ -4,6 +4,14 @@ Verified 17 September 2026. Source reviewed: phelo1/Claude_Qual at
 eae50d69c3aeee7d8c376773950eb56267258541. The original repository was not modified.
 This report supersedes the 0.2 verification report for current behavior.
 
+## Shadow evidence integrity — 19 September 2026
+
+Full Windows/Python 3.12 suite: **337 passed**, six upstream deprecation warnings, 244.96 seconds. Targeted shadow/autonomy checks passed before deployment. The previous broker-fix CI completed successfully across all four configurations.
+
+The live inspection found three invalid long-shadow configurations with stops above entries. Their resulting labels were quarantined, with original results preserved in a private state backup and each record's audit fields. The strategy remained baseline with no active trained model. New shadows validate price geometry, resolution/review quarantine legacy invalid rows, and model training independently excludes them. The Learning page displays exclusions and omits invalid returns.
+
+Remote verification: 23 valid completed shadows, 43 open, three expired and three quarantined. The refreshed model check reports 23 eligible records of the required 80; parameter research still waits for 20 fresh holdout sessions. Learning page returned HTTP 200 and showed the exclusions. No policy change or broker order was made, and IB Gateway remained running. A regression ensures model evidence refreshes during the holdout wait without rerunning backtests on consumed data.
+
 ## Oracle migration and broker recovery — 18 September 2026
 
 - Full Windows/Python 3.12 suite with the actual IBKR SDK installed: **323 passed**, 5 upstream asyncio/Starlette deprecation warnings, 512.92 seconds. Focused broker/data/manual-action recovery suite: **31 passed**.

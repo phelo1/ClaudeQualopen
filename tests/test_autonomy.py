@@ -45,6 +45,7 @@ def test_model_fits_weights_with_purged_later_validation():
 
 def test_shadows_cannot_supply_validation_and_estimates_are_excluded():
     rows=[{'date':str(d.date()),'resolved_on':str((d+pd.Timedelta(days=1)).date()),'status':'closed','r_multiple':1,'features':{'rvol':2}} for d in pd.bdate_range('2024-01-01',periods=100)]
+    rows = [dict(r, entry=50., stop=45., target=60.) for r in rows]
     assert train([],rows)['status']=='collecting'
     assert train([dict(r,evidence='estimated') for r in rows],[])['records']==0
 
@@ -72,6 +73,7 @@ def test_research_waits_for_fresh_holdout(tmp_path,monkeypatch):
     monkeypatch.setattr('qmag.backtest.run_backtest',forbidden)
     result=autonomy.research(tmp_path,{'ABC':pd.DataFrame({'close':100},index=dates)},cfg,[],[])
     assert result['status']=='collecting' and 'consumed' in result['reason']
+    assert autonomy.read(tmp_path)['model_training']['records'] == 0
 
 
 def test_forward_trial_promotes_after_new_evidence_and_invalidates_changed_config(tmp_path,monkeypatch):

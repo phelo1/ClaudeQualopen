@@ -33,4 +33,8 @@ The distinction follows the treatment of learning from fixed datasets in [Levine
 
 ## Important limits
 
+Shadow records require finite positive prices, a stop below the entry and any target above the entry. Invalid setups are not simulated. Existing invalid records are quarantined with their original results retained for diagnosis, and are excluded from outcome-model fitting and journal-review statistics. Validation runs both when resolving shadows and when reviewing them; model training also validates its input independently. No epsilon denominator turns an impossible stop into a huge return label.
+
+The outcome model's evidence count is refreshed during eligible research runs even when parameter backtesting is waiting for 20 fresh holdout sessions. That refresh does not bypass candidate validation or authorize deployment. Shadow-only evidence cannot supply the later non-shadow validation outcomes required by the model.
+
 The system learns associations, not reliable causal explanations for every win or loss. Survivorship bias, revised bars, changing market regimes, missing rejected alternatives and correlated positions can distort evaluation. Local prospective paper fills are not broker paper fills or real executable counterfactuals. Costs, latency, spread, queue priority and liquidity need richer data and broker validation. Model fitting and threshold optimization consume different evidence: historical backtests train/select rules; journal/paper/shadow/live records fit the outcome model. Backtest trade rows without recorded entry features are not silently imported into model training.

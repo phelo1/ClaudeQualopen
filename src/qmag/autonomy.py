@@ -116,6 +116,10 @@ def research(directory: Path, frames: dict, cfg: StrategyConfig, closed: list, s
             atomic_json(directory / FILE, state)
             return state["research"]
         active = active_policy(directory, cfg)
+        # Refresh outcome evidence even while historical parameter research is
+        # waiting for fresh sessions. Deployment still requires a forward trial.
+        model = train(closed, shadows, cfg.autonomy.min_model_records) if cfg.autonomy.train_outcome_model else {"status": "disabled"}
+        state["model_training"] = model
         baseline = cfg.with_overrides(active.get("overrides", {}))
         holdout = dates[-60:]
         if state.get("last_holdout_end"):
@@ -147,8 +151,6 @@ def research(directory: Path, frames: dict, cfg: StrategyConfig, closed: list, s
             validation = {"baseline": base, "candidate": trial, "from": start, "through": end}
             if trial.get("trades", 0) >= 10 and trial.get("total_return", 0) > base.get("total_return", 0) + cfg.autonomy.minimum_return_lift and abs(trial.get("max_drawdown", 1)) <= cfg.autonomy.max_drawdown:
                 chosen = {"kind": "parameters", "overrides": {**active.get("overrides", {}), **best["overrides"]}, "model": active.get("model")}
-        model = train(closed, shadows, cfg.autonomy.min_model_records) if cfg.autonomy.train_outcome_model else {"status": "disabled"}
-        state["model_training"] = model
         if chosen is None and model.get("status") == "candidate" and model.get("id") != (active.get("model") or {}).get("id"):
             chosen = {"kind": "outcome_model", "overrides": active.get("overrides", {}), "model": model}
         state["research"].update(status="candidate" if chosen else "no_candidate", validation=validation)

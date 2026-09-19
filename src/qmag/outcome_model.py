@@ -43,8 +43,9 @@ def predict(model: dict | None, features: dict) -> float | None:
 
 
 def train(closed: list[dict], shadows: list[dict], minimum: int = 80) -> dict:
+    from .shadow_quality import geometry_error
     records = []
-    for row in [*closed, *[dict(s, evidence="shadow") for s in shadows if s.get("status") == "closed"]]:
+    for row in [*closed, *[dict(s, evidence="shadow") for s in shadows if s.get("status") == "closed" and geometry_error(s) is None]]:
         evidence = row.get("evidence", "estimated")
         weight = SOURCE_WEIGHT.get(evidence, 0)
         try:
