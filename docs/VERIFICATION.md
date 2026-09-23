@@ -4,6 +4,16 @@ Verified 17 September 2026. Source reviewed: phelo1/Claude_Qual at
 eae50d69c3aeee7d8c376773950eb56267258541. The original repository was not modified.
 This report supersedes the 0.2 verification report for current behavior.
 
+## Connection recovery — 23 September 2026
+
+Full final Windows/Python 3.12 suite: **350 passed**, six upstream deprecation warnings, 354.86 seconds. Regressions cover concurrent requests from three separate processes, options-flow routing through the shared client, temporary 429 retries, preservation of real daily limits, recovery of legacy false pauses without resetting usage, long Retry-After handling, and degraded connection visibility.
+
+The deployed account returned a three-concurrent-request limit, but the old classifier treated the response's upgrade link as daily exhaustion. Only 1,169 of the configured 25,000 daily calls had been counted. Requests now share one network slot per budget directory across local processes. The separate options-flow request path now uses the same client, accounting and retry rules. Historical connection errors remain available but are explicitly labelled as previous errors after recovery.
+
+Remote verification: the incorrect pause cleared automatically with all 1,169 counted calls preserved. Six simultaneous real UW info requests queued and all returned HTTP 200. Subsequent authenticated probes passed for IBKR account access, current price data, UW options flow and UW edge research. The budget remained unpaused at 1,202 calls. Reconciliation was clean, scheduler heartbeat fresh, and local/public dashboard checks returned HTTP 200. IB Gateway's start timestamp stayed unchanged through deployment; a private backup of replaced files and the prior budget was retained. No test orders were submitted.
+
+Remaining issues were Stocktwits HTTP 403, missing Reddit credentials, and an institutional-data lookup without reported holder changes. Learning still lacks sufficient completed evidence for a model/policy promotion. These are not the repaired concurrency failure. Sharing the API key with other applications or machines remains outside the local request lease; transient external failures are still reported and retried within bounds.
+
 ## Shadow evidence integrity — 19 September 2026
 
 Full Windows/Python 3.12 suite: **337 passed**, six upstream deprecation warnings, 244.96 seconds. Targeted shadow/autonomy checks passed before deployment. The previous broker-fix CI completed successfully across all four configurations.

@@ -77,7 +77,7 @@
         <td class="num">{{ '%.0f ms'|format(c.latency_ms) if c.latency_ms is not none else '–' }}</td>
         <td class="num">{{ '{:,}'.format(c['items']) if c['items'] is not none else '–' }}</td>
         <td class="num {{ 'r' if c.consecutive_failures else '' }}">{{ c.failures }}{% if c.consecutive_failures %}<div class="m" style="font-size:10px; white-space:normal">{{ c.consecutive_failures }} in a row</div>{% endif %}</td>
-        <td class="err">{% if c.last_error %}{{ c.last_error }}<div class="m" style="font-size:11px">{{ c.last_error_at|ago }}</div>{% else %}–{% endif %}</td>
+        <td class="{{ 'err' if c.state == 'error' else 'm' }}">{% if c.last_error %}{% if c.state != 'error' %}<b>Previous error</b><br>{% endif %}{{ c.last_error }}<div class="m" style="font-size:11px">{{ c.last_error_at|ago }}{% if c.state == 'ok' %} · latest check succeeded{% endif %}</div>{% else %}–{% endif %}</td>
         <td class="detail">{{ c.detail }}</td>
       </tr>
       {% endfor %}
@@ -201,7 +201,8 @@
       cells[5].textContent = c.items != null ? c.items.toLocaleString() : '–';
       cells[6].innerHTML = c.failures + (c.consecutive_failures ? `<div class="m" style="font-size:10px; white-space:normal">${c.consecutive_failures} in a row</div>` : '');
       cells[6].className = 'num' + (c.consecutive_failures ? ' r' : '');
-      cells[7].innerHTML = c.last_error ? `${c.last_error.replace(/</g, '&lt;')}<div class="m" style="font-size:11px">${c.state === 'error' ? 'just now' : ''}</div>` : '–';
+      cells[7].className = c.state === 'error' ? 'err' : 'm';
+      cells[7].innerHTML = c.last_error ? `${c.state !== 'error' ? '<b>Previous error</b><br>' : ''}${c.last_error.replace(/&/g, '&amp;').replace(/</g, '&lt;')}<div class="m" style="font-size:11px">${c.state === 'error' ? 'just now' : c.state === 'ok' ? 'latest check succeeded' : ''}</div>` : '–';
       cells[8].textContent = c.detail || '';
     } catch (e) { cells[7].textContent = 'test failed: ' + e.message; }
     btn.textContent = 'Test'; btn.disabled = false;

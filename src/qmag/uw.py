@@ -2,10 +2,9 @@
 the edge score, the CLI and the connection probe.
 
 * bearer auth from ``UNUSUAL_WHALES_API_KEY`` (``https://unusualwhales.com/dashboard/api``)
-* one process-wide throttle (``UNUSUAL_WHALES_RPM``, default 100 requests per
-  minute) so a whole-market refresh or a 20-feature edge scan never trips
-  the account's limit; HTTP 429 answers are retried after the server's
-  ``Retry-After``
+* a process-wide RPM throttle and one in-flight request per shared budget
+  directory across local processes; temporary HTTP 429 answers get bounded
+  retries, while explicit daily exhaustion pauses until UTC midnight
 * a small on-disk TTL cache so facts that change once a day (short interest,
   insider filings, seasonality, earnings history ...) are fetched once a day
   and intraday reads (net premium, dark pool prints ...) once per context
@@ -103,7 +102,8 @@ def throttle(rpm: int | None = None) -> None:
 # Daily budget
 # --------------------------------------------------------------------------- #
 DEFAULT_BUDGET_FILE = Path("data/cache/uw_budget.json")
-_DAILY_WORDS = ("daily", "per day", "quota", "plan limit", "exceeded your", "upgrade")
+_DAILY_WORDS = ("daily", "per day", "per-day", "24 hour", "24-hour")
+_request_lock = threading.Lock()
 
 
 def _utc_today() -> str:
@@ -146,6 +146,14 @@ class DailyBudget:
             rec = dict(self._mem)
         if rec.get("date") != _utc_today():
             rec = {"date": _utc_today(), "calls": 0, "paused_reason": None, "paused_at": None}
+        reason = str(rec.get("paused_reason") or "")
+        # Older versions mistook the upgrade link in a concurrency-limit reply
+        # for daily exhaustion. Repair only that known case, preserving usage.
+        if "concurrent requests" in reason.lower() and not looks_like_daily_limit(429, reason):
+            rec["recovered_pause"] = {"reason": reason, "at": rec.get("paused_at")}
+            rec.update(paused_reason=None, paused_at=None)
+            self._save(rec)
+            log.info("Recovered obsolete UW concurrency pause; daily usage preserved")
         return rec
 
     def _save(self, rec: dict[str, Any]) -> None:
@@ -223,8 +231,6 @@ def budget() -> DailyBudget:
 
 def looks_like_daily_limit(status: int | None, reason: str) -> bool:
     text = (reason or "").lower()
-    if status in (402,) and text:
-        return True
     return status in (429, 402, 403) and any(w in text for w in _DAILY_WORDS)
 
 
@@ -318,20 +324,27 @@ class UWClient:
         t0 = time.perf_counter()
         status: int | None = None
         for attempt in range(3):
-            throttle(self.rpm)
-            blocked = budget().reserve()
-            if blocked:
-                self.blocked += 1
-                return UWResponse(error=blocked, status=None)
-            self.calls += 1
             try:
-                r = requests.get(f"{UW_BASE}{path}", headers=headers, params=params, timeout=self.timeout)
+                daily = budget()
+                # Separate from both the desk writer and budget writer: never
+                # hold those state leases while waiting for a network slot.
+                lease = desk_lock(daily.path.parent / ".uw-request") if daily.path else _request_lock
+                with lease:
+                    throttle(self.rpm)
+                    blocked = daily.reserve()
+                    if blocked:
+                        self.blocked += 1
+                        return UWResponse(error=blocked, status=None)
+                    self.calls += 1
+                    r = requests.get(f"{UW_BASE}{path}", headers=headers, params=params, timeout=self.timeout)
             except Exception as exc:
                 return UWResponse(error=f"{type(exc).__name__}: {exc}", latency_ms=(time.perf_counter() - t0) * 1000)
             status = getattr(r, "status_code", None)
             if status == 429 and attempt < 2 and not looks_like_daily_limit(status, _error_reason(r)):
                 wait = fnum(getattr(r, "headers", {}).get("Retry-After")) if hasattr(r, "headers") else None
-                time.sleep(min(max(wait or 5.0, 1.0), 30.0))
+                if wait is not None and wait > 30:
+                    break  # report the gap; never retry earlier than requested
+                time.sleep(max(wait or 5.0, 1.0))
                 continue
             break
         latency = (time.perf_counter() - t0) * 1000

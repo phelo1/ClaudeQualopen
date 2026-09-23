@@ -39,6 +39,8 @@ def status(directory: Path) -> dict:
     for name, connection in read_json(directory / "connections.json", {}).items():
         if not connection.get("ok", True):
             issues.append({"code": "connection_failed", "detail": f"{name}: {connection.get('last_error', 'unavailable')}", "action": "Inspect Connections and repair the reported service or credentials"})
+        elif connection.get("degraded"):
+            issues.append({"code": "connection_degraded", "detail": f"{name}: {connection.get('detail') or 'partial data availability'}", "action": "Inspect Connections for partial feed failures; successful requests do not imply full coverage"})
     halt = read_json(directory / "halt.json", {})
     return {"schema_version": 1, "at": now.isoformat(), "status": "attention" if issues else "healthy",
             "issues": issues, "heartbeat_age_seconds": age, "daemon": daemon, "halt": halt,

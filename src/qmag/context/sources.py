@@ -321,17 +321,16 @@ UW_BASE = "https://api.unusualwhales.com/api"
 
 def _uw_get(path: str, headers: dict, params: dict | None, errors: dict, name: str) -> list[dict] | dict | None:
     """One GET against the Unusual Whales API; failures are recorded per endpoint, never raised."""
-    from ..uw import throttle
+    from ..uw import UWClient
 
-    try:
-        throttle()
-        r = requests.get(f"{UW_BASE}{path}", headers=headers, params=params, timeout=TIMEOUT)
-        r.raise_for_status()
-        body = r.json()
-        return body.get("data", body) if isinstance(body, dict) else body
-    except Exception as exc:
-        errors[name] = f"{type(exc).__name__}: {exc}"
+    # Options flow must use the same concurrency lease, retries and daily
+    # accounting as the edge/price clients, including explicit caller keys.
+    key = headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    response = UWClient(key=key, cache_path=None, timeout=TIMEOUT).get(path, params)
+    if not response.ok:
+        errors[name] = response.error
         return None
+    return response.data
 
 
 def fetch_unusual_whales(report: ContextReport, settings=None, api_key: str | None = None, now: datetime | None = None) -> None:

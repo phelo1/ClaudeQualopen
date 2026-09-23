@@ -22,6 +22,13 @@ from tests.conftest import make_breakout_frame
 NOW = datetime(2026, 9, 11, 15, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def isolated_uw_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv("UNUSUAL_WHALES_BUDGET_FILE", str(tmp_path / "uw-budget.json"))
+    monkeypatch.delenv("UNUSUAL_WHALES_DAILY_CAP", raising=False)
+    monkeypatch.setattr("qmag.uw.throttle", lambda rpm=None: None)
+
+
 @pytest.fixture
 def breakout():
     cfg = StrategyConfig().with_overrides({"regime.enabled": False, "themes.enabled": False})
@@ -62,6 +69,7 @@ ALERTS = [
 class _Resp:
     def __init__(self, payload, status=200):
         self.payload, self.status = payload, status
+        self.status_code, self.headers = status, {}
 
     def raise_for_status(self):
         if self.status >= 400:
