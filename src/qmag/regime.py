@@ -14,7 +14,7 @@ they run after the close.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import pandas as pd
 
@@ -37,6 +37,40 @@ class RegimeSnapshot:
         too - an unknown regime is never assumed to be risk-on."""
         return not self.missing
 
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict) -> "RegimeSnapshot":
+        try:
+            return cls(**value)
+        except (TypeError, ValueError):
+            return cls(False, None, None, None, None, None, ["structured regime inputs unavailable"])
+
+    def breadth_multiplier(self, cfg: StrategyConfig) -> float:
+        r = cfg.regime
+        return r.breadth_scale if r.enabled and r.breadth_enabled and r.breadth_mode == "scale" and self.breadth_ok is False else 1.0
+
+    def entry_scale(self, cfg: StrategyConfig, setup: str) -> float | None:
+        """One policy for plans, replay and daily research; None means veto.
+
+        Reductions compound. An EP at 50% in a weak-breadth 50% regime
+        receives 25% of the base risk budget. Unknown/VIX never get exceptions.
+        """
+        r = cfg.regime
+        if not r.enabled:
+            return 1.0
+        if not self.known or (r.max_vix is not None and self.vix_ok is not True):
+            return None
+        if r.breadth_enabled and (self.breadth is None or pd.isna(self.breadth)):
+            return None
+        scale = self.breadth_multiplier(cfg)
+        if self.ok:
+            return scale if scale > 0 else None
+        if setup == "episodic_pivot" and r.risk_off_ep_scale > 0 and scale > 0:
+            return scale * r.risk_off_ep_scale
+        return None
+
     def describe(self, cfg: StrategyConfig) -> str:
         parts = []
         r = cfg.regime
@@ -44,10 +78,16 @@ class RegimeSnapshot:
             parts.append(f"{r.benchmark} {'>' if self.benchmark_ok else '<'} {r.ma_length}d MA")
         if self.breadth is not None:
             parts.append(f"breadth {self.breadth:.0%} (min {r.min_breadth:.0%})")
+            if r.breadth_mode == "scale" and self.breadth_ok is False:
+                parts.append(f"weak breadth: risk x{r.breadth_scale:.2f}")
         if self.vix is not None:
             parts.append(f"VIX {self.vix:.1f} (max {r.max_vix})")
         if self.missing:
             parts.append("REGIME UNKNOWN - missing data: " + "; ".join(self.missing) + " (treated as risk-off, nothing assumed)")
+        elif not self.ok:
+            ep = self.entry_scale(cfg, "episodic_pivot")
+            if ep is not None:
+                parts.append(f"breakouts blocked; episodic pivots permitted at risk x{ep:.2f}")
         return ", ".join(parts) if parts else "no regime inputs"
 
 
@@ -85,7 +125,7 @@ def regime_series(data: dict[str, pd.DataFrame], cfg: StrategyConfig) -> tuple[p
 
     if r.breadth_enabled:
         breadth = market_breadth(data, cfg).reindex(dates)
-        ok &= (breadth >= r.min_breadth).fillna(False).astype(bool)
+        ok &= breadth.notna() if r.breadth_mode == "scale" else (breadth >= r.min_breadth).fillna(False).astype(bool)
         if breadth.notna().any():
             active["breadth"] = True
 
@@ -137,8 +177,12 @@ def regime_snapshot(data: dict[str, pd.DataFrame], cfg: StrategyConfig, max_stal
         missing.append(f"{r.benchmark} bars not loaded")
     if r.breadth_enabled:
         if active["breadth"]:
-            breadth = float(market_breadth(data, cfg).dropna().iloc[-1])
-            breadth_ok = breadth >= r.min_breadth
+            value = market_breadth(data, cfg).reindex(ok_series.index).iloc[-1]
+            if pd.isna(value):
+                missing.append("breadth unavailable on the latest bar")
+            else:
+                breadth = float(value)
+                breadth_ok = breadth >= r.min_breadth
         else:
             missing.append("breadth (no universe symbols with enough history)")
     if r.max_vix is not None:
@@ -151,3 +195,35 @@ def regime_snapshot(data: dict[str, pd.DataFrame], cfg: StrategyConfig, max_stal
             missing.append(f"{r.vix_symbol} bars not loaded")
     ok = bool(ok_series.iloc[-1]) and not missing if len(ok_series) else False
     return RegimeSnapshot(ok, bench_ok, breadth, breadth_ok, vix, vix_ok, missing)
+
+
+def entry_scale_series(data: dict[str, pd.DataFrame], cfg: StrategyConfig, setup: str) -> pd.Series:
+    """Close-time policy, without lookahead. The backtester shifts it once."""
+    ok, _ = regime_series(data, cfg)
+    if not cfg.regime.enabled:
+        return pd.Series(1.0, index=ok.index)
+    r = cfg.regime
+    known = pd.Series(True, index=ok.index)
+    bench = data.get(r.benchmark)
+    if bench is None:
+        known[:] = False
+    else:
+        known &= bench['close'].rolling(r.ma_length).mean().reindex(ok.index).notna()
+    scale = pd.Series(1.0, index=ok.index)
+    if r.breadth_enabled:
+        breadth = market_breadth(data, cfg).reindex(ok.index)
+        known &= breadth.notna()
+        if r.breadth_mode == "scale":
+            scale.loc[breadth < r.min_breadth] = r.breadth_scale
+    if r.max_vix is not None:
+        vix = data.get(r.vix_symbol)
+        if vix is None:
+            known[:] = False
+        else:
+            values = vix['close'].reindex(ok.index)
+            known &= values.notna() & (values < r.max_vix)
+    allowed = ok.copy()
+    if setup == "episodic_pivot" and r.risk_off_ep_scale > 0:
+        scale.loc[~ok] *= r.risk_off_ep_scale
+        allowed |= known
+    return scale.where(known & allowed & (scale > 0))

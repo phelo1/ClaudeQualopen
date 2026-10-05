@@ -12,6 +12,8 @@ When deployed, predicted R contributes to setup ranking and rejects predictions 
 
 The parameter researcher can tighten or loosen daily-testable selection rules, initial ADR stop distance (0.5–2.0 times ADR), and initial profit target (1–5 R). Those ranges are implementation bounds, not recommended settings for a particular account. Entry-time stops/targets are stored with positions; a promotion does not retroactively rebuild their initial plan. The candidate budget rotates across the search space. Intraday confirmation/options thresholds are not selected from daily bars that cannot represent their inputs.
 
+Regime gate/scale settings remain operator policy, outside the learner's search space. Daily research shifts both regime permission and its sizing factor by one session. Prospective accounts receive the same structured market readings as the main desk; per-setup EP and breadth factors are applied once when sizing each plan. Entry evidence records the actual compounded risk multiplier.
+
 ## Discovery → prospective trial → deployment
 
 1. Use completed sessions only, with at least 300 historical days by default. Compare a bounded number of candidates on training data using return minus twice absolute drawdown and a minimum trade count.

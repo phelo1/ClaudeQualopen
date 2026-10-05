@@ -616,7 +616,12 @@ def chart(
     watch = BreakoutDetector().watchlist(symbol, df, cfg)
     sig = sig or watch
     if sig is not None:
-        plan = build_plan(sig, df.iloc[-1], cfg, equity, 0.0, equity, True)
+        from .regime import regime_snapshot
+        regime_state = regime_snapshot(raw, cfg)
+        if cfg.regime.enabled and cfg.regime.breadth_enabled:
+            regime_state.ok = False
+            regime_state.missing.append("single-symbol chart has no full-universe breadth evidence")
+        plan = build_plan(sig, df.iloc[-1], cfg, equity, 0.0, equity, regime_state.ok, regime_state=regime_state)
         path = chart_signal(df, sig, out, target=plan.partial_target, shares=plan.shares, note=plan.summary())
         console.print(f"{sig.setup} {'triggered' if sig is not watch else 'ready (buy-stop at pivot)'}: {plan.summary()}")
         if plan.failed_checks:

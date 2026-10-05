@@ -31,7 +31,7 @@ import pandas as pd
 from .config import StrategyConfig
 from .indicators import enrich
 from .plan import partial_quantity, size_shares
-from .regime import regime_series
+from .regime import entry_scale_series, regime_series
 from .sentiment import attach_sentiment_columns
 from .setups import BreakoutDetector, EpisodicPivotDetector, SetupDetector, Signal, detect_signals
 from .themes import attach_theme_columns
@@ -218,7 +218,9 @@ def run_backtest(
     regime_active = cfg.regime.enabled
     if cfg.regime.enabled and cfg.regime.benchmark not in data:
         log.warning("Regime filter enabled but benchmark %s not in data; new entries blocked", cfg.regime.benchmark)
-    regime_ok = regime_ok.shift(1).fillna(False).astype(bool)
+    regime_scales = {setup: entry_scale_series(data, cfg, setup) for setup in ("breakout", "episodic_pivot")}
+    if cfg.regime.enabled:
+        regime_scales = {setup: values.shift(1) for setup, values in regime_scales.items()}
 
     signals_by_date = collect_signals(data, cfg, detectors)
     if execution_model == "next_open":
@@ -297,13 +299,13 @@ def run_backtest(
         # ---- 2. new entries ---------------------------------------------
         todays = signals_by_date.get(date, [])
         signals_seen += len(todays)
-        allowed = True
-        if regime_active:
-            allowed = bool(regime_ok.get(date, False))
-        if allowed and todays:
+        if todays:
             # Size off yesterday's mark-to-market equity (no lookahead).
             mtm = cash + sum(p.remaining * (float(data[s].loc[date, "open"]) if date in data[s].index else float(data[s]["close"].asof(date))) for s, p in positions.items())
             for sig in sorted(todays, key=lambda s: s.score, reverse=True):
+                entry_scale = regime_scales.get(sig.setup, regime_scales["breakout"]).get(date, np.nan)
+                if pd.isna(entry_scale):
+                    continue
                 if len(positions) >= risk.max_positions or sig.symbol in positions:
                     continue
                 signal_row = data[sig.symbol].loc[sig.date]
@@ -319,7 +321,7 @@ def run_backtest(
                 if per_share_risk <= 0:
                     continue
                 exposure = sum(p.remaining * (float(data[s].loc[date, "open"]) if date in data[s].index else float(data[s]["close"].asof(date))) for s, p in positions.items())
-                shares = size_shares(mtm, fill, sig.stop, cfg, exposure, cash)
+                shares = size_shares(mtm, fill, sig.stop, cfg, exposure, cash, risk_mult=float(entry_scale))
                 if risk.max_portfolio_heat_pct > 0:
                     heat = sum(max(p.entry_price - p.stop, 0) * p.remaining for p in positions.values())
                     shares = min(shares, int(max(0, mtm * risk.max_portfolio_heat_pct - heat) // per_share_risk))

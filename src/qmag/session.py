@@ -44,7 +44,8 @@ from .data import DataProvider, make_provider, resolve_data_kind
 from .halt import halt_reason, halt_status, set_halt
 from .health import ConnectionRegistry, describe_connections, price_freshness
 from .market_calendar import NY
-from .regime import regime_snapshot
+from .regime import RegimeSnapshot, regime_snapshot
+from math import isfinite
 from .redact import describe_error
 from .providers import ProviderStore
 from .settings import SettingsStore
@@ -526,7 +527,7 @@ class TradingSession:
                 elif note.get("reason"):
                     pre_actions.append(f"PACE not applied: {note['reason']}")
             live = LiveClock(now=clock, pace=note)
-            regime = self._focused_regime(frames, cfg)
+            regime = self._focused_snapshot(frames, cfg)
             self.account()
             state = TraderState.load(self.state_path)
             state._persistence_path = self.state_path
@@ -549,26 +550,39 @@ class TradingSession:
         return report
 
     def _focused_regime(self, frames: dict[str, pd.DataFrame], cfg: StrategyConfig) -> tuple[bool, str, bool]:
-        """Regime for a focused pass: fresh benchmark / VIX gates on the aux bars
-        AND the breadth verdict of the latest full scan (breadth needs the whole
-        universe). No recent full scan -> unknown -> risk-off (fail closed)."""
+        snap = self._focused_snapshot(frames, cfg)
+        return snap.ok, snap.describe(cfg), snap.known
+
+    def _focused_snapshot(self, frames: dict[str, pd.DataFrame], cfg: StrategyConfig) -> RegimeSnapshot:
+        """Fresh trend/VIX plus dated, structured full-universe breadth.
+
+        Never inherit the previous combined verdict: yesterday's benchmark
+        failure must not masquerade as today's breadth failure. Old reports
+        without structured evidence need a full scan before new risk.
+        """
         if not cfg.regime.enabled:
-            return True, "regime filter disabled in config", True
+            return RegimeSnapshot(True, None, None, None, None, None)
         aux = {s: df for s, df in frames.items() if s in cfg.auxiliary_symbols}
         if not aux:
-            return False, "REGIME UNKNOWN - benchmark / VIX bars not loaded (treated as risk-off)", False
+            return RegimeSnapshot(False, None, None, None, None, None, ["benchmark / VIX bars not loaded"])
         nb_cfg = cfg.with_overrides({"regime.breadth_enabled": False}) if cfg.regime.breadth_enabled else cfg
         snap = regime_snapshot(aux, nb_cfg)
-        note, ok, known = snap.describe(nb_cfg), snap.ok, snap.known
         if not cfg.regime.breadth_enabled:
-            return ok, note, known
+            return snap
         prior = self.last_full_report() or {}
         latest = max(df.index[-1] for df in frames.values()).date()
-        if prior.get("asof") and pd.Timestamp(prior["asof"]).date() >= latest - pd.Timedelta(days=4):
-            p_ok, p_known = bool(prior.get("regime_ok", False)), bool(prior.get("regime_known", True))
-            note += f"; breadth from the {prior.get('label', 'full')} scan as of {prior['asof']}: {'ok' if p_ok else 'risk-off'}" if p_known else "; breadth unknown in the last full scan"
-            return ok and p_ok, note, known and p_known
-        return False, note + "; breadth unknown - no full scan in the last 4 sessions (treated as risk-off)", False
+        prior_cfg = prior.get("config", {}).get("regime", {})
+        value = prior.get("regime_details", {}).get("breadth")
+        recent = prior.get("asof") and latest - pd.Timedelta(days=4) <= pd.Timestamp(prior["asof"]).date() <= latest
+        matching = prior_cfg.get("breadth_ma_length") == cfg.regime.breadth_ma_length
+        if recent and matching and isinstance(value, (int, float)) and isfinite(value) and 0 <= value <= 1:
+            snap.breadth = float(value)
+            snap.breadth_ok = value >= cfg.regime.min_breadth
+            snap.ok = snap.ok and (cfg.regime.breadth_mode == "scale" or snap.breadth_ok)
+        else:
+            snap.ok = False
+            snap.missing.append("breadth unknown: a recent full scan with matching structured inputs is required")
+        return snap
 
     @serialized
     def screen_cycle(self, kind: str, now: datetime | None = None) -> dict:
@@ -808,29 +822,9 @@ class TradingSession:
         return describe_connections(self.s, self.cfg, self.state_dir, self.health)
 
     def current_regime(self, frames: dict[str, pd.DataFrame] | None = None) -> tuple[bool, str, bool]:
-        """(regime_ok, note, known) for on-demand lookups.
-
-        Prefers the last cycle report when it is from the latest session;
-        otherwise evaluates the benchmark / VIX gates on ``frames`` (breadth
-        needs the whole universe, so it is reported as unavailable rather than
-        computed from one symbol). Nothing is assumed when no input exists.
-        """
-        if not self.cfg.regime.enabled:
-            return True, "regime filter disabled in config", True
-        prior = self.last_report() or {}
-        if prior.get("regime_note") and prior.get("asof") and frames:
-            latest = max(df.index[-1] for df in frames.values()).date()
-            if pd.Timestamp(prior["asof"]).date() >= latest - pd.Timedelta(days=4):
-                return bool(prior.get("regime_ok", False)), f"{prior['regime_note']} (from the {prior.get('label', 'last')} cycle as of {prior['asof']})", bool(prior.get("regime_known", True))
-        aux = {s: df for s, df in (frames or {}).items() if s in self.cfg.auxiliary_symbols}
-        if not aux:
-            return False, "REGIME UNKNOWN - no cycle report and no benchmark bars loaded (treated as risk-off)", False
-        cfg = self.cfg.with_overrides({"regime.breadth_enabled": False}) if self.cfg.regime.breadth_enabled else self.cfg
-        snap = regime_snapshot(aux, cfg)
-        note = snap.describe(cfg)
-        if self.cfg.regime.breadth_enabled:
-            note += "; breadth not evaluated (needs a full cycle)"
-        return snap.ok, note, snap.known
+        """Fresh trend/VIX and the latest full-universe breadth evidence."""
+        snap = self._focused_snapshot(frames or {}, self.cfg)
+        return snap.ok, snap.describe(self.cfg), snap.known
 
     def analyze_symbol(self, symbol: str, max_age_hours: float = 0.25) -> dict:
         """On-demand desk check for one ticker: setup status, sized plan, context, rationale, chart.
@@ -867,7 +861,8 @@ class TradingSession:
         fresh = price_freshness({symbol: frames[symbol]})
         if fresh.get("stale"):
             gaps.append("price data stale: " + fresh["note"])
-        regime_ok, regime_note, regime_known = self.current_regime(frames)
+        regime_state = self._focused_snapshot(frames, cfg)
+        regime_ok, regime_note, regime_known = regime_state.ok, regime_state.describe(cfg), regime_state.known
         if not regime_known:
             gaps.append("market regime unknown: " + regime_note)
         try:
@@ -919,7 +914,7 @@ class TradingSession:
             plan = build_plan(
                 sig, df.iloc[-2] if status == "triggered" and len(df) > 1 else last, cfg, equity, exposure, cash, regime_ok,
                 entry_override=None, context_row=None, context=context, regime_note=regime_note,
-                context_expected=self.gatherer is not None, equity_known=equity_known,
+                context_expected=self.gatherer is not None, equity_known=equity_known, regime_state=regime_state,
             )
             if fresh.get("stale"):
                 plan.checks["price_data_fresh"] = False

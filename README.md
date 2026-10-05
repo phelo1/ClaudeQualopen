@@ -4,6 +4,8 @@
 
 The system scans its equity universe, researches unusual options activity, finds setups, applies portfolio limits, sizes entries, manages exits, reconciles executions, tracks missed setups and runs improvement experiments. Humans and maintenance agents can inspect the same state through the dashboard, CLI and API.
 
+Market breadth can either block entries (`regime.breadth_mode: gate`, the default) or reduce their risk budget (`scale`, with `breadth_scale: 0.5` for half risk). An explicit `risk_off_ep_scale` can admit episodic pivots in a known risk-off regime; zero disables that exception. The reductions multiply: weak breadth at 0.5 and a risk-off EP factor of 0.5 yield 0.25 of base risk. Missing market inputs and failed VIX checks still block entries. Full scans, focused scans, manual lookup plans and historical evaluation use this same policy. See [Migration](docs/MIGRATION.md) before restoring a legacy desk.
+
 This rebuild follows the [whole-program review](docs/REVIEW.md) of [Claude_Qual](https://github.com/phelo1/Claude_Qual). Version 0.3 extends the initial redesign with an autonomous controller, fitted outcome-model weights, prospective challenger accounts, automatic promotion/canary/rollback, durable execution tracking and operational supervision.
 
 ![Workspace overview](docs/images/dashboard-desktop.png)

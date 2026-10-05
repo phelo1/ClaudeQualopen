@@ -71,7 +71,7 @@ from .plan import (
     partial_quantity,
     resize_for_budget,
 )
-from .regime import regime_snapshot
+from .regime import RegimeSnapshot, regime_snapshot
 from .setups import BreakoutDetector, Signal
 
 log = logging.getLogger(__name__)
@@ -300,6 +300,8 @@ class CycleReport:
     recent_r: list[float] = field(default_factory=list)
     context: dict[str, dict] = field(default_factory=dict)
     regime_known: bool = True  # False when an enabled regime input was missing (regime_ok is then False)
+    regime_details: dict = field(default_factory=dict)
+    regime_size_mult: float = 1.0
     data_gaps: list[str] = field(default_factory=list)  # required data that could not be sourced this cycle
     scan: str = "full"  # full | focused
     scope: list[str] = field(default_factory=list)  # symbols a focused pass looked at
@@ -331,6 +333,8 @@ class CycleReport:
             "regime_ok": self.regime_ok,
             "regime_known": self.regime_known,
             "regime_note": self.regime_note,
+            "regime_details": self.regime_details,
+            "regime_size_mult": self.regime_size_mult,
             "data_gaps": self.data_gaps,
             "equity": self.equity,
             "risk_mult": self.risk_mult,
@@ -679,7 +683,8 @@ def entry_features(
         "committee_verdict": cm.get("verdict"),
         "regime_ok": bool(regime_ok),
         "regime_note": (regime_note or "")[:160],
-        "risk_mult": _num(risk_mult),
+        "risk_mult": _num(plan.risk_mult),
+        "regime_risk_multiplier": plan.notes.get("regime_risk_multiplier", 1.0),
         "checks": dict(plan.checks),
         "failed_checks": list(plan.failed_checks),
         "data_gaps": len(plan.data_gaps),
@@ -826,7 +831,7 @@ def run_cycle(
     gatherer: ContextGatherer | None = None,
     block_new_entries: str | None = None,
     scan_symbols: set[str] | None = None,
-    regime: tuple[bool, str, bool] | None = None,
+    regime: RegimeSnapshot | tuple[bool, str, bool] | None = None,
     full_scan: bool = True,
     pre_actions: list[str] | None = None,
     screen_hits: dict[str, dict] | None = None,
@@ -1061,14 +1066,24 @@ def run_cycle(
         ensure_exit_orders(broker, pos, report, state)
 
     # 3. Regime (market sentiment): benchmark trend, breadth, volatility.
-    if regime is not None:
+    regime_state = None
+    if isinstance(regime, RegimeSnapshot):
+        regime_state = regime
+        report.regime_ok, report.regime_note, report.regime_known = regime.ok, regime.describe(cfg), regime.known
+        if not regime.known:
+            report.data_gaps.append("regime unknown: " + report.regime_note)
+    elif regime is not None:
         report.regime_ok, report.regime_note, report.regime_known = regime
+        if cfg.regime.enabled and (cfg.regime.breadth_mode == "scale" or cfg.regime.risk_off_ep_scale > 0):
+            regime_state = RegimeSnapshot(False, None, None, None, None, None, ["structured inputs required for reduced-risk policy"])
+            report.regime_ok, report.regime_known, report.regime_note = False, False, regime_state.describe(cfg)
         if not report.regime_known:
             gap = "regime unknown: " + (report.regime_note or "no full scan to inherit breadth from")
             report.data_gaps.append(gap)
             report.actions.append(f"DATA {gap} -> treated as risk-off")
     elif cfg.regime.enabled:
         snap = regime_snapshot(data, cfg)
+        regime_state = snap
         report.regime_ok = snap.ok
         report.regime_known = snap.known
         report.regime_note = snap.describe(cfg)
@@ -1136,11 +1151,19 @@ def run_cycle(
     # A focused pass only spends context/LLM budget on names that can trigger
     # this session; the rest of the arming list is left as it is.
     plan_watch = watch
+    def pending_policy_changed(sym: str) -> bool:
+        pending = prior_pending.get(sym)
+        if pending is None or regime_state is None:
+            return False
+        desired = regime_state.entry_scale(cfg, pending.setup)
+        previous = (pending.features or {}).get("regime_risk_multiplier", 1.0)
+        return desired is None or desired != previous
+
     if not full_scan:
         near: list[Signal] = []
         for sig in watch:
             dist = float(sig.details.get("distance_to_pivot_pct", 0.0) or 0.0) / 100.0  # detector reports percent
-            if abs(dist) <= sched.trigger_distance_pct:
+            if abs(dist) <= sched.trigger_distance_pct or pending_policy_changed(sig.symbol):
                 near.append(sig)
             elif sig.symbol in state.arming or sig.symbol in prior_pending:
                 report.skipped_far.append(sig.symbol)
@@ -1155,7 +1178,7 @@ def run_cycle(
     for sym, pend in list(prior_pending.items()):
         if sym in planned_symbols:
             continue
-        if not full_scan and (sym in report.skipped_far or (sym in state.arming and sym not in scanned)):
+        if not full_scan and not pending_policy_changed(sym) and (sym in report.skipped_far or (sym in state.arming and sym not in scanned)):
             continue  # still armed: too far to re-plan, or no fresh bar to judge it on
         if not cancel_pending(broker, state, sym):
             continue
@@ -1164,6 +1187,12 @@ def run_cycle(
         report.actions.append(f"CANCEL untriggered entry {sym}")
     # Every surviving buy-stop occupies a slot until this pass replaces or drops it.
     slots = cfg.risk.max_positions - len(held) - len(prior_pending)
+
+    if regime_state is not None:
+        report.regime_details = regime_state.to_dict()
+        report.regime_size_mult = regime_state.breadth_multiplier(cfg)
+        if report.regime_size_mult != 1.0:
+            report.actions.append(f"REGIME weak breadth: new-entry risk x{report.regime_size_mult:.2f}; other gates still apply")
 
     # Adaptive risk from the trade journal.
     report.recent_r = recent_r_multiples(state)
@@ -1227,6 +1256,7 @@ def run_cycle(
             sig, df.iloc[-1], cfg, acct.equity, exposure, cash, report.regime_ok, entry_override=entry, context_row=ctx_row,
             context=contexts.get(sig.symbol), risk_mult=risk_mult, regime_note=report.regime_note,
             context_expected=gatherer is not None and cfg.context.enabled,
+            regime_state=regime_state,
         )
         if block_new_entries:
             plan.checks["price_data_fresh"] = False
@@ -1412,7 +1442,9 @@ def run_cycle(
         report.actions.append(f"PLAN buy-stop {plan.summary()}")
 
     if not report.regime_ok and (triggered or watch):
-        report.actions.append(f"REGIME risk-off ({report.regime_note}): no new longs")
+        ep_scale = regime_state.entry_scale(cfg, "episodic_pivot") if regime_state else None
+        permitted = f"episodic pivots may enter at risk x{ep_scale:.2f}; breakouts blocked" if ep_scale is not None else "no new longs"
+        report.actions.append(f"REGIME risk-off ({report.regime_note}): {permitted}")
 
     # 5. Arming list: the narrowed watchlist the intraday passes concentrate on.
     _update_arming(state, report, triggered, watch, held, screen_hits, cfg, full_scan, label)

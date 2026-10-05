@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from .config import StrategyConfig
+from .regime import RegimeSnapshot
 from .sentiment import sentiment_ok
 from .setups import Signal, momentum_ok
 from .themes import theme_ok
@@ -199,6 +200,7 @@ def build_plan(
     regime_note: str = "",
     context_expected: bool = False,
     equity_known: bool = True,
+    regime_state: RegimeSnapshot | None = None,
 ) -> TradePlan:
     """Turn a signal into a fully specified, checked and justified trade plan.
 
@@ -214,6 +216,14 @@ def build_plan(
     ``broker_account`` check instead of sizing against an assumed balance.
     """
     from .rationale import build_rationale
+
+    regime_scale = 1.0
+    if regime_state is not None:
+        decision = regime_state.entry_scale(cfg, sig.setup)
+        regime_ok = decision is not None
+        regime_scale = decision if decision is not None else 1.0
+        risk_mult *= regime_scale
+        regime_note = regime_state.describe(cfg)
 
     m = cfg.management
     ctx_row = row if context_row is None else context_row
@@ -295,6 +305,9 @@ def build_plan(
         data_gaps=gaps,
     )
     plan.rationale = build_rationale(plan, sig, ctx_row, cfg, context, regime_note=regime_note, risk_mult=risk_mult)
+    plan.notes["regime_risk_multiplier"] = regime_scale
+    if regime_state is not None:
+        plan.notes["market_regime_policy"] = regime_note
     if not equity_known:
         plan.rationale["size"] = (
             "NOT SIZED: the broker account could not be read, so equity and cash are unknown. "

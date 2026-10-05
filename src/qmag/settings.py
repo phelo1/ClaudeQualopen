@@ -607,6 +607,9 @@ FIELD_HELP: dict[str, str] = {
     "regime.breadth_enabled": "Also require a share of the scan universe to be above its moving average - a direct read of whether momentum names are working.",
     "regime.breadth_ma_length": "Moving average (bars) used for the breadth count.",
     "regime.min_breadth": "Share of the universe above its MA needed (0.40 = 40 %).",
+    "regime.breadth_mode": "gate blocks new entries below the breadth threshold; scale reduces their risk budget instead. Missing breadth still blocks entries.",
+    "regime.breadth_scale": "Risk-budget multiplier when breadth is weak in scale mode (0.5 = half risk). Multiplies any episodic-pivot, adaptive or canary reduction.",
+    "regime.risk_off_ep_scale": "Allow episodic pivots in a known risk-off regime at this risk multiplier (0 = disabled). Missing market data and failed VIX checks still block them.",
     "regime.vix_symbol": "Volatility index symbol used by max_vix (must be available from the data source).",
     # -- themes
     "themes.min_theme_members": "A theme needs at least this many scanned members with bars to rank; smaller groups are ignored (their stocks count as themeless).",
@@ -759,6 +762,7 @@ PROVIDER_KEYS = ("reviewer.provider", "insider_scan.provider", "learning.provide
                  "committee.bull_provider", "committee.bear_provider", "committee.risk_provider")
 
 CHOICES: dict[str, tuple[str, ...]] = {
+    "regime.breadth_mode": ("gate", "scale"),
     "reviewer.mode": ("advisory", "gate", "gate_and_size"),
     "sentiment.source": ("csv",),
     "options_flow.provider": ("unusual_whales",),

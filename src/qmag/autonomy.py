@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from .config import StrategyConfig
+from .regime import RegimeSnapshot
 from .learning import KNOBS, KNOB_BY_KEY, config_value
 from .persistence import atomic_json, desk_lock
 
@@ -244,7 +245,7 @@ def observe(directory: Path, frames: dict, cfg: StrategyConfig, report, live, li
                 context = FrozenContext(report.context)
                 shadow_report = run_cycle(frames, broker, policy_cfg, book, asof=pd.Timestamp(report.asof), gatherer=context,
                                           full_scan=report.scan == "full", scan_symbols=set(report.scope), live=live,
-                                          regime=(report.regime_ok, report.regime_note, report.regime_known), label="prospective_trial")
+                                          regime=RegimeSnapshot.from_dict(report.regime_details) if report.regime_details else (report.regime_ok, report.regime_note, report.regime_known), label="prospective_trial")
                 book.save(folder / "trader.json")
                 if context.missing and policy_cfg.context.enabled:
                     coverage.append(f"{name}: candidate context records unavailable")

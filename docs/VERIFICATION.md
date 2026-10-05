@@ -4,6 +4,12 @@ Verified 17 September 2026. Source reviewed: phelo1/Claude_Qual at
 eae50d69c3aeee7d8c376773950eb56267258541. The original repository was not modified.
 This report supersedes the 0.2 verification report for current behavior.
 
+## Reduced-risk regime recovery — 5 October 2026
+
+Full Windows/Python 3.12 suite: **367 passed**, six upstream deprecation warnings, 265.56 seconds. Regression coverage includes weak-breadth sizing, compounded episodic-pivot reductions, missing/VIX data vetoes, current focused-scan trend with dated whole-universe breadth, rejection of unstructured legacy overrides, cancellation of oversized resting entries, and backtests using the previous session's policy. Default installations retain the conservative breadth gate; restoring the legacy operator policy requires explicit settings.
+
+This corrects an omitted migration setting; it is not evidence that the restored strategy will be profitable. No manual test orders are part of deployment verification. Credentials remain outside source control.
+
 ## Connection recovery — 23 September 2026
 
 Full final Windows/Python 3.12 suite: **350 passed**, six upstream deprecation warnings, 354.86 seconds. Regressions cover concurrent requests from three separate processes, options-flow routing through the shared client, temporary 429 retries, preservation of real daily limits, recovery of legacy false pauses without resetting usage, long Retry-After handling, and degraded connection visibility.

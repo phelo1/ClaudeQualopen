@@ -145,6 +145,18 @@ class RegimeFilter:
     breadth_enabled: bool = True
     breadth_ma_length: int = 20
     min_breadth: float = 0.40  # >= 40 % of the universe above its 20-day MA
+    breadth_mode: str = "gate"  # gate or scale; legacy imports retain their explicit mode
+    breadth_scale: float = 0.5
+    risk_off_ep_scale: float = 0.0  # 0 disables the known-risk-off EP exception
+
+    def __post_init__(self):
+        import math
+        if self.breadth_mode not in ("gate", "scale"):
+            raise ValueError("regime.breadth_mode must be gate or scale")
+        for name in ("breadth_scale", "risk_off_ep_scale"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(f"regime.{name} must be finite and between 0 and 1")
     vix_symbol: str = "^VIX"
     max_vix: float | None = None  # e.g. 30.0 to stand aside in panics; None = off
 

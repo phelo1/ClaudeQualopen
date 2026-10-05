@@ -1,5 +1,15 @@
 # Migration
 
+## Reduced-risk regime settings
+
+Legacy `regime.breadth_mode`, `regime.breadth_scale` and `regime.risk_off_ep_scale` are preserved when importing saved settings. The earlier rebuild omitted these fields and therefore substituted a hard breadth veto. Existing rebuilt desks require an explicit operator restoration of these values; package defaults remain `gate` and no risk-off EP exception. The Oracle desk's authorized values are `scale`, `0.5`, and `0.5` respectively.
+
+Multipliers reduce the stop-based per-trade risk budget; position, cash, heat and daily-loss limits still apply independently. Two simultaneous 50% reductions combine to 25%, and any canary/adaptive reduction compounds further. The EP exception cannot override unknown inputs or a failed enabled VIX gate. The benchmark still uses its configured moving average; this change does not restore the legacy optional MA hysteresis band.
+
+Focused scans now require dated, structured breadth evidence from a recent full scan with the same breadth moving-average length. Old reports with only a combined regime boolean fail closed until a full-universe measurement is available. The current benchmark is re-evaluated rather than inheriting yesterday's combined failure. A pending order whose permitted risk changes is reconsidered even outside the focused scan's proximity window.
+
+Back up configuration and state before deployment. A maintenance preview may recompute structured breadth from the complete cached universe and seed that evidence in the prior full report, without submitting orders or changing its historical plans. Preserve the source date, record the refresh timestamp, and reject incomplete/mismatched inputs. Normal scheduled cycles then refresh decisions under the restored policy.
+
 1. Stop the original daemon/dashboard and back up the whole state directory.
 2. Install this repository in a fresh Python environment; leave the source repository unchanged.
 3. Start with a new paper state directory and configured real CSV/market data. Verify account snapshots, connection status and the desk.
