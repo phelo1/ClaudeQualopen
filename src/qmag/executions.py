@@ -99,26 +99,60 @@ class BrokerView:
         if self._ib_trades is None:
             self._ib_trades = list(b.ib.trades()) + list(b.ib.reqCompletedOrders(apiOnly=True))
             self._ib_fills = list(b.ib.reqExecutions())
-        trades = [t for t in self._ib_trades if t.order.clientId == b.client_id and
-                  (str(t.order.orderId) == order_id if order_id else t.order.orderRef == tag)]
+        account = getattr(b, "account_id", None)
+        def owned_fill(f):
+            return f.execution.clientId == b.client_id and (not account or getattr(f.execution, "acctNumber", None) == account)
+        owned_fills = [f for f in self._ib_fills if owned_fill(f)]
+        permanent_ids = {getattr(f.execution, "permId", 0) for f in owned_fills if str(f.execution.orderId) == order_id}
+        if order_id.startswith("perm:"):
+            permanent_ids.add(int(order_id.split(":", 1)[1]))
+        permanent_ids.discard(0)
+        def matches(t):
+            o = t.order
+            if account and getattr(o, "account", None) != account:
+                return False
+            if o.clientId == b.client_id and o.orderId:
+                return str(o.orderId) == order_id if order_id else bool(tag and o.orderRef == tag)
+            # Completed-order callbacks reset clientId/orderId to zero. Recover
+            # via account-scoped executions or the unique persisted intent tag.
+            return bool(account and not o.orderId and not o.clientId and
+                        (getattr(o, "permId", 0) in permanent_ids or (tag and o.orderRef == tag)))
+        trades = [t for t in self._ib_trades if matches(t)]
         if not trades:
             return None  # historical API coverage is finite; keep persisted state
+        identities = {getattr(t.order, "permId", 0) for t in trades} - {0}
+        if len(identities) > 1:
+            raise ValueError("Ambiguous IBKR execution identity")
         t = trades[-1]
         o, st = t.order, t.orderStatus
         # execId de-duplicates executions returned through multiple IB callbacks.
-        fills = {f.execution.execId: f for f in self._ib_fills
-                 if f.execution.orderId == o.orderId and f.execution.clientId == o.clientId}
-        qty = int(st.filled or 0)
-        avg = float(st.avgFillPrice) if qty else None
+        fills = {f.execution.execId: f for f in owned_fills
+                 if (getattr(o, "permId", 0) and getattr(f.execution, "permId", 0) == o.permId) or
+                    (o.orderId and f.execution.orderId == o.orderId and f.execution.clientId == o.clientId)}
+        def quantity(value):
+            value = float(value or 0)
+            return int(value) if math.isfinite(value) and 0 <= value < 1e15 else 0
+        qty = max(quantity(st.filled), quantity(getattr(o, "filledQuantity", 0)),
+                  max((quantity(getattr(f.execution, "cumQty", 0)) for f in fills.values()), default=0))
+        avg = float(st.avgFillPrice) if qty and st.avgFillPrice else None
+        if qty and avg is None:
+            cumulative = [f for f in fills.values() if quantity(getattr(f.execution, "cumQty", 0)) == qty]
+            if cumulative:
+                avg = float(cumulative[-1].execution.avgPrice)
+            elif sum(float(f.execution.shares) for f in fills.values()) == qty:
+                avg = sum(float(f.execution.shares)*float(f.execution.price) for f in fills.values())/qty
+        original_id = order_id or (str(o.orderId) if o.orderId else
+                      next((str(f.execution.orderId) for f in fills.values()), f"perm:{getattr(o, 'permId', 0)}"))
         commissions = [getattr(f, "commissionReport", None) for f in fills.values()]
         complete = bool(fills) and sum(float(f.execution.shares) for f in fills.values()) == qty
         complete = complete and all(c and c.currency == "USD" and math.isfinite(c.commission)
                                     and abs(c.commission) < 1e20 for c in commissions)
         fees = sum(c.commission for c in commissions) if complete else None
-        children = [str(x.order.orderId) for x in self._ib_trades if x.order.parentId == o.orderId and x.order.clientId == o.clientId]
+        children = [str(x.order.orderId) for x in self._ib_trades if o.orderId and x.order.orderId and x.order.parentId == o.orderId and x.order.clientId == o.clientId]
         if getattr(o, "ocaGroup", ""):
-            children += [str(x.order.orderId) for x in self._ib_trades if getattr(x.order, "ocaGroup", "") == o.ocaGroup and x.order.clientId == o.clientId and x.order.orderId != o.orderId]
-        return OrderSnapshot(str(o.orderId), t.contract.symbol, o.action.lower(), int(o.totalQuantity),
+            children += [str(x.order.orderId) for x in self._ib_trades if x.order.orderId and getattr(x.order, "ocaGroup", "") == o.ocaGroup and x.order.clientId == o.clientId and x.order.orderId != o.orderId]
+        requested = max(quantity(o.totalQuantity), qty)
+        return OrderSnapshot(original_id, t.contract.symbol, o.action.lower(), requested,
                              qty, avg, status(st.status), o.orderRef or "", fees,
                              updated_at=max((str(f.time) for f in fills.values()), default=None), child_ids=list(dict.fromkeys(children)))
 
@@ -220,8 +254,8 @@ def cancel_one(broker, order_id: str) -> bool:
 
 
 def poll(view: BrokerView, state, order_id: str, tag: str = "") -> dict | None:
-    snapshot = view.order(order_id, tag)
     prior = state.executions.get(order_id)
+    snapshot = view.order(order_id, tag or (prior or {}).get("tag", ""))
     if snapshot is None:
         return prior if prior and prior.get("status") in TERMINAL else None
     row = asdict(snapshot)

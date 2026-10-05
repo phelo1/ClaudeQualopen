@@ -6,6 +6,8 @@ This report supersedes the 0.2 verification report for current behavior.
 
 ## Reduced-risk regime recovery — 5 October 2026
 
+The follow-up execution suite passed **386 tests** on Windows/Python 3.12 in 262.30 seconds, with six upstream deprecation warnings. Live paper operation exposed two additional defects: IBKR rejected wide stop-limit offsets, and completed-order callbacks reset client/order IDs and omitted status fill fields after reconnect. Regression tests cover the actual six rejected price pairs, tighter caller ceilings, attached protection, completed cancellations, account/client isolation, ambiguous identities, cumulative fill recovery, and incomplete fee evidence. A read-only check against the real broker history recovered the 194-share ILMN paper fill and its three active protective exit orders; no manual test orders were submitted. The regime commit separately passed all four GitHub CI configurations.
+
 Full Windows/Python 3.12 suite: **367 passed**, six upstream deprecation warnings, 265.56 seconds. Regression coverage includes weak-breadth sizing, compounded episodic-pivot reductions, missing/VIX data vetoes, current focused-scan trend with dated whole-universe breadth, rejection of unstructured legacy overrides, cancellation of oversized resting entries, and backtests using the previous session's policy. Default installations retain the conservative breadth gate; restoring the legacy operator policy requires explicit settings.
 
 This corrects an omitted migration setting; it is not evidence that the restored strategy will be profitable. No manual test orders are part of deployment verification. Credentials remain outside source control.

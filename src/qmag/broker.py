@@ -581,9 +581,21 @@ class IBKRBroker:
 
     def buy_stop_bracket(self, symbol: str, qty: int, trigger: float, stop_loss: float, limit: float | None = None, tag: str = "") -> Order:
         from ib_async import StopLimitOrder, StopOrder
+        from decimal import Decimal, ROUND_FLOOR
 
+        # The strategy's maximum gap is an eligibility ceiling, not a suitable
+        # resting-order offset. IB rejected the old ~5% offsets. Constrain the
+        # adapter to 50 bps and always preserve a tighter caller limit; this is
+        # our execution policy, not a claim about a universal IB price band.
+        if not math.isfinite(trigger) or trigger <= 0 or (limit is not None and (not math.isfinite(limit) or limit < trigger)):
+            raise ValueError("IBKR buy-stop requires a positive trigger and a finite limit at or above it")
+        ceiling = Decimal(str(trigger)) * Decimal('1.005')
+        if limit is not None:
+            ceiling = min(ceiling, Decimal(str(limit)))
+        lmt = float(ceiling.quantize(Decimal('0.01'), rounding=ROUND_FLOOR))
+        if lmt < round(trigger, 2):
+            raise ValueError("IBKR entry limit has no valid cent price at or above its trigger")
         c = self._contract(symbol)
-        lmt = round(limit if limit is not None else trigger * 1.05, 2)
         parent = StopLimitOrder("BUY", qty, lmtPrice=lmt, stopPrice=round(trigger, 2), tif="DAY", transmit=False, account=self.account_id, orderRef=tag[:60])
         parent.orderId = self.ib.client.getReqId()
         child = StopOrder("SELL", qty, stopPrice=round(stop_loss, 2), tif="GTC", account=self.account_id, parentId=parent.orderId, transmit=True, orderRef=f"protective:{symbol}")

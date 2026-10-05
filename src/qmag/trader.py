@@ -1431,6 +1431,8 @@ def run_cycle(
         state.checkpoint()
         order = broker.buy_stop_bracket(sig.symbol, plan.shares, sig.entry, plan.stop, limit=limit, tag=tag)
         pending.order_id = order.id
+        plan.notes["entry_limit"] = order.limit
+        pending.plan = plan.to_dict()
         state.pending[sig.symbol] = asdict(pending)
         state.checkpoint()
         report.plans.append(plan)
@@ -1439,7 +1441,7 @@ def run_cycle(
         slots -= 1
         report.heat_pct += float(plan.risk_dollars) / acct.equity if acct.equity > 0 else 0.0
         state.checkpoint()
-        report.actions.append(f"PLAN buy-stop {plan.summary()}")
+        report.actions.append(f"PLAN buy-stop {plan.summary()}" + (f"; entry limit {order.limit:.2f}" if order.limit is not None else ""))
 
     if not report.regime_ok and (triggered or watch):
         ep_scale = regime_state.entry_scale(cfg, "episodic_pivot") if regime_state else None
