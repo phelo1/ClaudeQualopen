@@ -183,6 +183,15 @@ class ManagedPosition:
     def __post_init__(self) -> None:
         if self.remaining < 0:
             self.remaining = self.shares
+        # A confirmed market entry's trigger is its purchase reference, which
+        # may be well above the breakout. Recover the actual setup pivot from
+        # the frozen plan, including existing journals written by older builds.
+        try:
+            pivot = float((self.plan or {}).get('pivot'))
+        except (TypeError, ValueError):
+            pivot = None
+        if pivot is not None and np.isfinite(pivot) and pivot > 0:
+            self.pivot = pivot
 
     @property
     def risk_per_share(self) -> float:
