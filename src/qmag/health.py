@@ -75,6 +75,7 @@ SPECS: tuple[ConnectionSpec, ...] = (
     ConnectionSpec("screener", "Market screener (gappers / movers)", "data", "pre-market gap scan, intraday movers sweep"),
     ConnectionSpec("broker", "Broker", "broker", "account equity, positions, orders", required=True),
     ConnectionSpec("broker_orders", "Broker order routing (test orders)", "broker", "proves brackets, market orders and cancels work end to end"),
+    ConnectionSpec("broker_history", "IBKR completed-order history", "broker", "historical reconciliation; retained callbacks remain available during an outage"),
     ConnectionSpec("news_finviz", "finviz news", "context", "news score, catalysts"),
     ConnectionSpec("fundamentals", "finviz fundamentals (per symbol)", "context", "float, short interest, earnings date"),
     ConnectionSpec("news_yahoo", "Yahoo news", "context", "news score fallback"),
@@ -366,6 +367,8 @@ def _configured(name: str, settings: "SessionSettings", cfg: "StrategyConfig") -
             return False, True, "sentiment filter off (bring a date,symbol,score CSV to enable)"
         ok, note = _file_info(Path(cfg.sentiment.path) if cfg.sentiment.path else None)
         return True, ok, note
+    if name == 'broker_history':
+        return settings.broker.startswith('ibkr'), True, 'checked during execution reconciliation; missing records remain unresolved'
     if name == "broker_orders":
         enabled, ok, note = _configured("broker", settings, cfg)
         return enabled, ok, ("run a test order from the connections page or `qmag broker-test`" if ok else note)
@@ -517,7 +520,7 @@ def _read_json(path: Path) -> dict | None:
 
 # Connections ``probe_connections`` can exercise on their own. The rest are observed, not called:
 # the daemon and the cycle report themselves, order routing has its own test, the scans run on schedule.
-NOT_PROBEABLE = frozenset({"daemon", "cycle", "broker_orders", "insider_scan", "learning", "screener"})
+NOT_PROBEABLE = frozenset({"daemon", "cycle", "broker_orders", "broker_history", "insider_scan", "learning", "screener"})
 
 
 def _status(spec: ConnectionSpec, enabled: bool, configured: bool, note: str, rec: dict | None) -> dict[str, Any]:
@@ -617,7 +620,8 @@ def _daemon_record(status: dict | None) -> dict | None:
     age = _age_seconds(status.get("heartbeat"))
     failing = [t for t in status.get("tasks", []) if t.get("last_error")]
     rec = {"last_checked": status.get("heartbeat"), "attempts": sum(int(t.get("runs", 0)) for t in status.get("tasks", [])), "failures": len(failing)}
-    if age is None or age > HEARTBEAT_STALE_SECONDS:
+    from .watchdog import heartbeat_limit
+    if age is None or age > heartbeat_limit(status.get('running')) or age < -60:
         rec.update(ok=False, last_error=f"no heartbeat for {age / 60:.0f} min" if age else "no heartbeat", last_error_at=status.get("heartbeat"), detail="process stopped or hung")
     elif failing:
         rec.update(ok=True, degraded=True, last_ok=status.get("heartbeat"), detail="alive; failing tasks: " + ", ".join(f"{t['name']} ({t['last_error']})" for t in failing), last_error=failing[-1]["last_error"], last_error_at=failing[-1].get("last_run"))

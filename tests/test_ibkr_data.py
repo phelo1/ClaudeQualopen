@@ -61,7 +61,7 @@ class FakeIB:
         self.connect_args = None
         FakeIB.instances.append(self)
 
-    def connect(self, host, port, clientId, readonly, timeout):
+    def connect(self, host, port, clientId, readonly, timeout, raiseSyncErrors=False):
         if FakeIB.refuse:
             raise ConnectionRefusedError("gateway down")
         self.connected = True

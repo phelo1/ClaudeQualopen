@@ -387,7 +387,8 @@ def _call_gemini(
         "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json", "responseSchema": schema or RESPONSE_SCHEMA},
     }
     # Key in a header, never in the URL: HTTP errors quote the URL they hit.
-    r = requests.post(url, headers={"x-goog-api-key": key}, json=body, timeout=timeout)
+    from .llm_transport import post
+    r = post(url, headers={"x-goog-api-key": key}, json=body, timeout=timeout)
     if getattr(r, "status_code", None) == 404:
         raise RuntimeError(f"Gemini model '{model}' not found for this key - pick one from the list on the settings page")
     r.raise_for_status()
@@ -409,7 +410,8 @@ def _call_openai(
             {"role": "user", "content": json.dumps(bundle, default=str)[:60000]},
         ],
     }
-    r = requests.post(f"{base}/chat/completions", headers=openai_headers(key, base), json=body, timeout=timeout)
+    from .llm_transport import post
+    r = post(f"{base}/chat/completions", headers=openai_headers(key, base), json=body, timeout=timeout)
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
 

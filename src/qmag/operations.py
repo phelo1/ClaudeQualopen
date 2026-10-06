@@ -28,7 +28,8 @@ def status(directory: Path) -> dict:
     issues = []
     heartbeat = daemon.get("heartbeat")
     age = (now - datetime.fromisoformat(heartbeat).astimezone(timezone.utc)).total_seconds() if heartbeat else None
-    if age is None or age > 300:
+    from .watchdog import inspect
+    if inspect(directory, now)['stalled']:
         issues.append({"code": "daemon_not_healthy", "detail": "No recent scheduler heartbeat", "action": "Start or inspect qmag autopilot and its service log"})
     recon = book.get("reconciliation", {})
     for issue in recon.get("issues", []):
@@ -58,7 +59,7 @@ def housekeeping(directory: Path, retention_days: int = 180) -> dict:
         root.mkdir(parents=True, exist_ok=True)
         target = root / f"state-{now.strftime('%Y%m%dT%H%M%S%fZ')}.zip"
         # Explicit allowlist: settings.env / auth tokens are never exported.
-        sources = [directory / name for name in ("trader.json", "ledger.json", "autonomy.json", "settings.yaml", "halt.json", "last_report.json")]
+        sources = [directory / name for name in ("trader.json", "ledger.json", "ibkr_evidence.json", "autonomy.json", "settings.yaml", "halt.json", "last_report.json")]
         sources += list((directory / "autonomy").glob("*/*/trader.json"))
         sources += list((directory / "autonomy").glob("*/*/ledger.json"))
         with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:

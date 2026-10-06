@@ -7,7 +7,7 @@ from tests.synthetic import CsvUniverse, SyntheticProvider, write_csv_universe
 
 
 @pytest.fixture(autouse=True)
-def _no_ibkr_auto(monkeypatch):
+def _no_ibkr_auto(monkeypatch, tmp_path):
     """``--data auto`` must not pick IBKR just because a gateway happens to be
     running on the machine that runs the tests; tests that want the IBKR
     path set ``IBKR_PREFER_DATA=yes`` themselves."""
@@ -16,6 +16,7 @@ def _no_ibkr_auto(monkeypatch):
     # no paid-feed credentials; otherwise worker ordering can arm a required
     # context gate in an unrelated engine replay. Tests configure their own.
     monkeypatch.delenv("UNUSUAL_WHALES_API_KEY", raising=False)
+    monkeypatch.setenv('QMAG_LLM_RUNTIME_DIR', str(tmp_path/'llm-runtime'))
 
 
 @pytest.fixture

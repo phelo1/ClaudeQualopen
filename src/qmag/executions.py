@@ -36,6 +36,7 @@ class OrderSnapshot:
     currency: str = "USD"
     updated_at: str | None = None
     child_ids: list[str] = field(default_factory=list)
+    permanent_id: int = 0
 
     @property
     def notional(self) -> float:
@@ -58,7 +59,7 @@ class BrokerView:
         self._ib_trades = None
         self._ib_fills = None
 
-    def order(self, order_id: str = "", tag: str = "") -> OrderSnapshot | None:
+    def order(self, order_id: str = "", tag: str = "", permanent_id: int = 0) -> OrderSnapshot | None:
         b = self.broker
         if hasattr(b, "order_snapshot"):
             result = b.order_snapshot(order_id, tag)
@@ -74,7 +75,7 @@ class BrokerView:
         elif self.name.startswith("alpaca"):
             result = self._alpaca(order_id, tag)
         elif self.name.startswith("ibkr"):
-            result = self._ibkr(order_id, tag)
+            result = self._ibkr(order_id, tag, permanent_id)
         elif self.name.startswith("mt5"):
             result = self._mt5(order_id, tag)
         else:
@@ -94,11 +95,23 @@ class BrokerView:
                              o.client_order_id or "", updated_at=str(o.updated_at) if o.updated_at else None,
                              child_ids=[str(x.id) for x in (o.legs or [])])
 
-    def _ibkr(self, order_id, tag):
+    def _ibkr(self, order_id, tag, permanent_id=0):
         b = self.broker
         if self._ib_trades is None:
-            self._ib_trades = list(b.ib.trades()) + list(b.ib.reqCompletedOrders(apiOnly=True))
-            self._ib_fills = list(b.ib.reqExecutions())
+            evidence = getattr(b, 'evidence', None)
+            saved_trades, saved_fills = evidence.observations() if evidence else ([], [])
+            completed = []
+            if not getattr(b, 'history_error', None):
+                old_timeout = getattr(b.ib, 'RequestTimeout', 20)
+                try:
+                    b.ib.RequestTimeout = 5
+                    completed = list(b.ib.reqCompletedOrders(apiOnly=True))
+                except TimeoutError:
+                    b.history_error = 'Completed-order history timed out; using retained broker callbacks and current executions. Unknown orders remain unresolved.'
+                finally:
+                    b.ib.RequestTimeout = old_timeout
+            self._ib_trades = saved_trades + list(b.ib.trades()) + completed
+            self._ib_fills = saved_fills + list(b.ib.reqExecutions())
         account = getattr(b, "account_id", None)
         def owned_fill(f):
             return f.execution.clientId == b.client_id and (not account or getattr(f.execution, "acctNumber", None) == account)
@@ -107,6 +120,12 @@ class BrokerView:
         if order_id.startswith("perm:"):
             permanent_ids.add(int(order_id.split(":", 1)[1]))
         permanent_ids.discard(0)
+        if permanent_id:
+            permanent_ids = {permanent_id}
+        if not permanent_ids and order_id:
+            permanent_ids = {getattr(t.order, 'permId', 0) for t in self._ib_trades
+                             if t.order.clientId == b.client_id and str(t.order.orderId) == order_id
+                             and (not account or getattr(t.order, 'account', None) == account)} - {0}
         def matches(t):
             o = t.order
             if account and getattr(o, "account", None) != account:
@@ -116,7 +135,7 @@ class BrokerView:
             # Completed-order callbacks reset clientId/orderId to zero. Recover
             # via account-scoped executions or the unique persisted intent tag.
             return bool(account and not o.orderId and not o.clientId and
-                        (getattr(o, "permId", 0) in permanent_ids or (tag and o.orderRef == tag)))
+                        (getattr(o, "permId", 0) in permanent_ids if permanent_ids else (tag and o.orderRef == tag)))
         trades = [t for t in self._ib_trades if matches(t)]
         if not trades:
             return None  # historical API coverage is finite; keep persisted state
@@ -129,6 +148,13 @@ class BrokerView:
         fills = {f.execution.execId: f for f in owned_fills
                  if (getattr(o, "permId", 0) and getattr(f.execution, "permId", 0) == o.permId) or
                     (o.orderId and f.execution.orderId == o.orderId and f.execution.clientId == o.clientId)}
+        # A fresh execution response may precede its commission callback.
+        for f in owned_fills:
+            prior = getattr(f, 'commissionReport', None)
+            current = fills.get(f.execution.execId)
+            report = getattr(current, 'commissionReport', None)
+            if current and prior and prior.currency and (not report or not report.currency):
+                fills[f.execution.execId] = f  # SDK Fill is an immutable named tuple
         def quantity(value):
             value = float(value or 0)
             return int(value) if math.isfinite(value) and 0 <= value < 1e15 else 0
@@ -153,8 +179,8 @@ class BrokerView:
             children += [str(x.order.orderId) for x in self._ib_trades if x.order.orderId and getattr(x.order, "ocaGroup", "") == o.ocaGroup and x.order.clientId == o.clientId and x.order.orderId != o.orderId]
         requested = max(quantity(o.totalQuantity), qty)
         return OrderSnapshot(original_id, t.contract.symbol, o.action.lower(), requested,
-                             qty, avg, status(st.status), o.orderRef or "", fees,
-                             updated_at=max((str(f.time) for f in fills.values()), default=None), child_ids=list(dict.fromkeys(children)))
+                             qty, avg, 'filled' if requested and qty == requested else status(st.status), o.orderRef or "", fees,
+                             updated_at=max((str(f.time) for f in fills.values()), default=None), child_ids=list(dict.fromkeys(children)), permanent_id=getattr(o, 'permId', 0))
 
     def _mt5(self, order_id, tag):
         b, now = self.broker, datetime.now(timezone.utc)
@@ -255,13 +281,16 @@ def cancel_one(broker, order_id: str) -> bool:
 
 def poll(view: BrokerView, state, order_id: str, tag: str = "") -> dict | None:
     prior = state.executions.get(order_id)
-    snapshot = view.order(order_id, tag or (prior or {}).get("tag", ""))
+    kwargs = {'permanent_id': (prior or {}).get('permanent_id', 0)} if view.name.startswith('ibkr') else {}
+    snapshot = view.order(order_id, tag or (prior or {}).get("tag", ""), **kwargs)
     if snapshot is None:
         return prior if prior and prior.get("status") in TERMINAL else None
     row = asdict(snapshot)
     prior = state.executions.get(snapshot.id)
     if prior and snapshot.filled < prior["filled"]:
         raise ValueError(f"Execution quantity regressed for {snapshot.id}; reconciliation required")
+    if prior and snapshot.filled == prior['filled'] and row['fees'] is None:
+        row['fees'] = prior.get('fees')
     state.executions[snapshot.id] = row
     return row
 
@@ -389,7 +418,8 @@ def reconcile(broker, state, cfg, asof, actions) -> set[str]:
                     continue
                 last = next((r for r in reversed(sells) if r["filled"]), None)
                 if last:
-                    rec = pos.close_record(asof, "broker_execution", 0, last["average"])
+                    closed_on = str(last.get('updated_at') or asof)[:10]
+                    rec = pos.close_record(closed_on, "broker_execution", 0, last["average"])
                     state.closed.append(rec)
                     state.managed.pop(symbol, None)
                     actions.append(f"CLOSED {symbol}: reconciled broker fills, {rec['pnl']:+.2f} USD before any unreported costs")

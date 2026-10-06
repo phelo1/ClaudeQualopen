@@ -1328,5 +1328,12 @@ def autopilot_command(
     run(broker=broker, data=data, state_dir=state_dir, config=config, port=port, live_confirmed=broker in LIVE_BROKERS)
 
 
+@app.command("watchdog")
+def watchdog_command(state_dir: Path = StateDirOpt, recover: bool = typer.Option(False), broker: str = BrokerOpt, data: str = DataOpt):
+    """Detect scheduler stalls; --recover restarts only the installed daemon service."""
+    from .watchdog import check
+    print(json.dumps(check(state_dir, recover=recover), indent=2))
+
+
 if __name__ == "__main__":
     app()

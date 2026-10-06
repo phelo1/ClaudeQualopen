@@ -343,6 +343,8 @@ def f_option_sentiment(c: _Ctx) -> Sub:
     resp = c.get(f"/stock/{c.sym}/volatility/option-sentiment")
     if not resp.ok:
         return Sub(error=resp.error)
+    if isinstance(resp.data, dict) and 'latest' in resp.data and resp.data.get('latest') is None and not resp.data.get('history'):
+        return Sub(error='no options sentiment observations reported for this symbol')
     latest = resp.data.get("latest") if isinstance(resp.data, dict) and isinstance(resp.data.get("latest"), dict) else resp.data
     v = _find_number(latest, ("score", "sentiment_score", "sentiment", "blended_score", "blended", "positioning_score"))
     if v is None:
@@ -357,6 +359,8 @@ def f_options_pulse(c: _Ctx) -> Sub:
     resp = c.get(f"/stock/{c.sym}/options-pulse")
     if not resp.ok:
         return Sub(error=resp.error)
+    if isinstance(resp.data, dict) and 'latest' in resp.data and resp.data.get('latest') is None and not resp.data.get('intraday'):
+        return Sub(error='no options pulse observations reported for this symbol')
     d = resp.data
     latest = d.get("latest") if isinstance(d, dict) and isinstance(d.get("latest"), dict) else d
     v = _find_number(latest, ("sntm_score",))
@@ -671,7 +675,10 @@ def f_earnings(c: _Ctx) -> Sub:
     past = []
     for r in _rows(resp):
         try:
-            d = pd.Timestamp(r.get("report_date")).date()
+            stamp = pd.Timestamp(r.get("report_date"))
+            if pd.isna(stamp):
+                continue
+            d = stamp.date()
         except (TypeError, ValueError):
             continue
         if d <= c.now.date() and r.get("actual_eps") is not None:

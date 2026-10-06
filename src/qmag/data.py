@@ -143,106 +143,7 @@ class CachedDailyProvider:
             df = pd.read_csv(path, index_col=0, parse_dates=True)
         except Exception:
             return None
-        if df.empty:
-            return None
-        return validate_ohlcv(df)
-
-    def _is_fresh(self, sym: str, cached: pd.DataFrame, end: str | None) -> bool:
-        if end is not None:
-            return cached.index[-1] >= pd.Timestamp(end) - pd.Timedelta(days=4)
-        path = self._cache_path(sym)
-        if path is None:
-            return True
-        age_hours = (time.time() - path.stat().st_mtime) / 3600
-        recent = cached.index[-1] >= pd.Timestamp.today().normalize() - pd.Timedelta(days=4)
-        return recent and age_hours < self.max_age_hours
-
-    def _write_cache(self, sym: str, df: pd.DataFrame) -> None:
-        path = self._cache_path(sym)
-        if path is None:
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(path)
-
-
-
-# --------------------------------------------------------------------------- #
-# yfinance
-# --------------------------------------------------------------------------- #
-def _yfinance_pool(threads: int) -> None:
-    """Give yfinance a worker pool of the requested size.
-
-    yfinance hands each ticker to ``multitasking``, whose default pool is
-    created at import time with one slot per CPU core - and a pool of one
-    slot runs everything synchronously.  ``yf.download(threads=N)`` only
-    updates the global default for *future* pools, so on a small VM a
-    whole-market pull would crawl one ticker at a time.  Creating a named
-    pool makes it the active one for the calls that follow.
-    """
-    try:
-        import multitasking
-
-        pool = multitasking.config["POOLS"].get("qmag-yfinance")
-        if pool is None or pool.get("threads") != max(2, threads):
-            multitasking.createPool(name="qmag-yfinance", threads=max(2, threads), engine="thread")
-        else:
-            multitasking.config["POOL_NAME"] = "qmag-yfinance"
-    except Exception as exc:  # pragma: no cover - only a speed optimisation
-        log.debug("could not size the yfinance pool: %s", exc)
-
-
-@dataclass
-class YFinanceProvider(CachedDailyProvider):
-    """Daily bars from Yahoo.
-
-    Symbols are downloaded in batches (``batch_size``) so a whole-market
-    universe of several thousand names is a few minutes, not an hour.
-    """
-
-    batch_size: int = 250
-    # yfinance sizes its pool from the CPU count (2 threads on a 1-vCPU VM); the
-    # work is network-bound, so pin a sensible number regardless of the host.
-    download_threads: int = 8
-
-    def _download(self, symbols: list[str], start: str | None, end: str | None) -> dict[str, pd.DataFrame]:
-        import yfinance as yf  # imported lazily: optional at test time
-
-        out: dict[str, pd.DataFrame] = {}
-        for i in range(0, len(symbols), self.batch_size):
-            batch = symbols[i : i + self.batch_size]
-            threads = max(1, min(self.download_threads, len(batch)))
-            _yfinance_pool(threads)
-            try:
-                raw = yf.download(batch, start=start, end=end, auto_adjust=True, progress=False, group_by="ticker", threads=threads)
-            except Exception as exc:  # network hiccup: skip the batch, keep going, but record it
-                log.warning("Batch download failed (%s...): %s", batch[0], exc)
-                self._note_error(f"batch {batch[0]}..{batch[-1]} ({len(batch)} symbols): {type(exc).__name__}: {exc}")
-                continue
-            if raw is None or raw.empty:
-                self._note_error(f"batch {batch[0]}..{batch[-1]} ({len(batch)} symbols): empty response")
-                continue
-            for sym in batch:
-                if isinstance(raw.columns, pd.MultiIndex):
-                    if sym not in raw.columns.get_level_values(0):
-                        continue
-                    frame = raw[sym]
-                else:
-                    frame = raw
-                frame = frame.rename(columns=str.lower)
-                if frame.empty or "close" not in frame or frame["close"].dropna().empty:
-                    continue
-                try:
-                    out[sym] = validate_ohlcv(frame)
-                except ValueError:
-                    continue
-        return out
-
-
-# --------------------------------------------------------------------------- #
-# Unusual Whales daily candles
-# --------------------------------------------------------------------------- #
-def uw_timeframe(start: str | None, end: str | None) -> str:
-    """UW ``timeframe`` string ('45D', '3M', '2Y') covering ``start``..``end``."""
+     ``."""
     end_ts = pd.Timestamp(end) if end else pd.Timestamp.today().normalize()
     if not start:
         return "2Y"
@@ -519,7 +420,12 @@ class IBKRProvider(CachedDailyProvider):
         wrapper_log = logging.getLogger("ib_async.wrapper")
         self._wrapper_level = wrapper_log.level
         wrapper_log.setLevel(logging.CRITICAL)
-        ib.connect(host, port, clientId=client_id, readonly=True, timeout=15)
+        ib.RequestTimeout = 20
+        try:
+            ib.connect(host, port, clientId=client_id, readonly=True, timeout=15, raiseSyncErrors=True)
+        except Exception:
+            ib.disconnect()
+            raise
         mdt = int(self.market_data_type or os.environ.get("IBKR_MARKET_DATA_TYPE") or 3)
         try:
             ib.reqMarketDataType(mdt)

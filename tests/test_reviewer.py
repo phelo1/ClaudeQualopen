@@ -167,6 +167,7 @@ def test_review_trade_never_raises(monkeypatch):
     assert v["error"].startswith("ConnectionError")
 
     monkeypatch.setattr(reviewer.requests, "post", lambda *a, **k: _Resp({"choices": [{"message": {"content": "I cannot decide."}}]}))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-recovered")  # new credentials do not inherit the failed key's cooldown
     v = reviewer.review_trade({"symbol": "ABC"}, ReviewerSettings(enabled=True, provider="openai"))
     assert v["error"].startswith("ValueError")
 

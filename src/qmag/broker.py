@@ -434,9 +434,9 @@ class IBKRBroker:
     name = "ibkr"
     _fx_cache: dict[tuple, tuple[pd.Timestamp, float]] = {}
 
-    def __init__(self, paper: bool = True, host: str | None = None, port: int | None = None, client_id: int | None = None):
+    def __init__(self, paper: bool = True, host: str | None = None, port: int | None = None, client_id: int | None = None, evidence_path: Path | None = None):
         try:
-            from ib_async import IB
+            from ib_async import IB, StartupFetch
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise RuntimeError("Install the IBKR extra: pip install 'qmag[ibkr]'") from exc
         self.host = host or os.environ.get("IBKR_HOST", "127.0.0.1")
@@ -446,7 +446,15 @@ class IBKRBroker:
         from .ibkr_runtime import prepare_ibkr_loop
         prepare_ibkr_loop()
         self.ib = IB()
-        self.ib.connect(self.host, self.port, clientId=self.client_id, readonly=False, timeout=15)
+        self.ib.RequestTimeout = 20
+        try:
+            # Completed-order history can stall independently of the live account.
+            # Fetch it separately, with a bounded timeout and durable evidence.
+            fields = StartupFetch.POSITIONS | StartupFetch.ORDERS_OPEN | StartupFetch.ACCOUNT_UPDATES | StartupFetch.EXECUTIONS
+            self.ib.connect(self.host, self.port, clientId=self.client_id, readonly=False, timeout=15, raiseSyncErrors=True, fetchFields=fields)
+        except Exception:
+            self.ib.disconnect()
+            raise
         accounts = list(self.ib.managedAccounts())
         selected = os.environ.get("IBKR_ACCOUNT", "").strip()
         if not selected and len(accounts) == 1:
@@ -459,6 +467,15 @@ class IBKRBroker:
             self.ib.disconnect()
             raise RuntimeError("IBKR paper mode requires a paper account (DU prefix); check gateway login")
         self.name = "ibkr-paper" if paper else "ibkr-live"
+        self.evidence = None
+        if evidence_path is not None:
+            from .ibkr_evidence import IBKREvidence
+            try:
+                self.evidence = IBKREvidence(evidence_path, selected, self.client_id)
+                self.evidence.attach(self.ib)
+            except Exception:
+                self.ib.disconnect()
+                raise
 
     # ib_async needs its event loop pumped for fills/positions to update.
     def wait(self, seconds: float) -> None:
@@ -467,6 +484,8 @@ class IBKRBroker:
     def _contract(self, symbol: str):
         from ib_async import Stock
 
+        if getattr(self, 'evidence', None) is not None and self.evidence.error:
+            raise RuntimeError('IBKR execution evidence could not be persisted; refusing a new order')
         c = Stock(symbol, "SMART", "USD")
         self.ib.qualifyContracts(c)
         return c

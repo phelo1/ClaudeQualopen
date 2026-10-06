@@ -97,6 +97,32 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
+sudo tee /etc/systemd/system/qmag-watchdog.service >/dev/null <<EOF
+[Unit]
+Description=ClaudeQual scheduler stall recovery
+[Service]
+Type=oneshot
+User=$RUN_USER
+WorkingDirectory=$APP_DIR
+ExecStart=$APP_DIR/.venv/bin/qmag watchdog --state-dir $STATE_DIR --recover
+TimeoutStartSec=180
+EOF
+sudo tee /etc/systemd/system/qmag-watchdog.timer >/dev/null <<EOF
+[Unit]
+Description=Check ClaudeQual scheduler every minute
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1min
+[Install]
+WantedBy=timers.target
+EOF
+# Narrow permission: the watchdog may restart only this daemon, never Gateway.
+SYSTEMCTL=$(command -v systemctl)
+printf '%s ALL=(root) NOPASSWD: %s restart qmag-daemon\n' "$RUN_USER" "$SYSTEMCTL" | sudo tee /etc/sudoers.d/qmag-watchdog >/dev/null
+sudo chmod 440 /etc/sudoers.d/qmag-watchdog
+sudo visudo -cf /etc/sudoers.d/qmag-watchdog
+sudo systemctl daemon-reload
+sudo systemctl enable -q --now qmag-watchdog.timer
 sudo systemctl enable -q qmag-dashboard qmag-daemon
 sudo systemctl restart qmag-dashboard
 

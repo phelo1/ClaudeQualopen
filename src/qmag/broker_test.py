@@ -3,9 +3,9 @@
 A broker "connection OK" only proves the key works. These tests exercise the
 same order calls the trader makes, end to end, and report every step:
 
-* **bracket** - place a 1-share buy-stop bracket far above the market (it
-  cannot fill), confirm the broker acknowledges it, cancel it, confirm it is
-  gone. Safe on any account; this is the exact order structure the
+* **bracket** - place a 1-share buy-stop bracket above the market, confirm
+  the broker acknowledges it, cancel it, confirm it is gone. A price jump
+  can still trigger it; this exercises the order structure the
   ``resting`` / ``hybrid`` entry modes rely on, and where IBKR / MT5 differ
   most from Alpaca.
 * **fill** - 1-share market buy, confirm the position, market sell, confirm

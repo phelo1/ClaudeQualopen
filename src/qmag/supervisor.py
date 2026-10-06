@@ -33,6 +33,16 @@ def run(*, broker, data, state_dir: Path, config=None, port=8765, live_confirmed
             now = time.monotonic()
             for name, args in commands.items():
                 child = children.get(name)
+                if child and name == 'daemon' and child.poll() is None and now-started[name] > 300:
+                    from .watchdog import inspect
+                    health = inspect(state_dir)
+                    if health['stalled'] and health.get('pid', child.pid) == child.pid:
+                        child.terminate()
+                        try:
+                            child.wait(timeout=15)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            child.wait()
                 if child and child.poll() is not None:
                     children.pop(name)
                     logs.pop(name).close()

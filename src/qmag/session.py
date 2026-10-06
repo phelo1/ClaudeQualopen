@@ -301,6 +301,9 @@ class TradingSession:
         if not capable(self.broker):
             return {"ok": False, "issues": ["Broker has no execution snapshot adapter"]}
         reconcile(self.broker, state, self.cfg, str(pd.Timestamp.now(tz=NY).date()), actions)
+        history_error = getattr(self.broker, 'history_error', None)
+        if self.s.broker.startswith('ibkr'):
+            self.health.record('broker_history', not history_error, error=history_error)
         held = self.broker.positions()
         for symbol, row in list(state.managed.items()):
             if any(issue.startswith(symbol+":") for issue in state.reconciliation.get("issues", [])):
@@ -345,7 +348,8 @@ class TradingSession:
                 if self.s.broker == "paper":
                     self._broker = make_broker("paper", state_path=self.state_dir / "ledger.json", starting_cash=self.cfg.risk.starting_equity, slippage_bps=self.cfg.risk.slippage_bps, commission_per_share=self.cfg.risk.commission_per_share)
                 else:
-                    self._broker = make_broker(self.s.broker)
+                    kwargs = {"evidence_path": self.state_dir / "ibkr_evidence.json"} if self.s.broker.startswith("ibkr") else {}
+                    self._broker = make_broker(self.s.broker, **kwargs)
             except Exception as exc:
                 self.health.record("broker", False, detail=f"{self.s.broker}: connect", error=f"{type(exc).__name__}: {exc}")
                 raise
